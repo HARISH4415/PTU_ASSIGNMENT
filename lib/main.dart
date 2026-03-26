@@ -113,6 +113,22 @@ class AppData extends ChangeNotifier {
     }
   }
 
+  void unTerminateMcq(String assignmentId) {
+    mcqFlagged[assignmentId] = false;
+    mcqScores.remove(assignmentId);
+    mcqStudentAnswers.remove(assignmentId);
+    for (var list in classAssignments.values) {
+      for (var a in list) {
+        if (a['id'] == assignmentId) {
+          a['isDone'] = false;
+          a['isMissed'] = false;
+          notifyListeners();
+          return;
+        }
+      }
+    }
+  }
+
   void loginAs(UserRole role) {
     currentUserRole = role;
     notifyListeners();
@@ -3565,7 +3581,7 @@ class _AssignmentInteractionScreenState
           }
 
           Widget heroBanner = Container(
-            padding: const EdgeInsets.all(32),
+            padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 colors: [
@@ -3575,16 +3591,16 @@ class _AssignmentInteractionScreenState
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
               ),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: widget.classColor.withAlpha(30)),
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: widget.classColor.withAlpha(50)),
             ),
             child: Row(
               children: [
                 Container(
-                  padding: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.all(20),
                   decoration: BoxDecoration(
                     color: Colors.white,
-                    shape: BoxShape.circle,
+                    borderRadius: BorderRadius.circular(20),
                     boxShadow: [
                       BoxShadow(
                         color: widget.classColor.withAlpha(20),
@@ -3594,59 +3610,46 @@ class _AssignmentInteractionScreenState
                     ],
                   ),
                   child: Icon(
-                    widget.assignment['mcqData'] != null
-                        ? Icons.quiz
-                        : Icons.assignment,
+                    widget.assignment['mcqData'] != null ? Icons.quiz_outlined : Icons.assignment_outlined,
                     color: widget.classColor,
-                    size: 36,
+                    size: 28,
                   ),
                 ),
-                const SizedBox(width: 24),
+                const SizedBox(width: 32),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
                         widget.assignment['title'],
-                        style: const TextStyle(
-                          fontSize: 32,
+                        style: GoogleFonts.outfit(
+                          fontSize: 28,
                           fontWeight: FontWeight.bold,
-                          color: Colors.black87,
+                          color: const Color(0xFF1A1A2E),
                         ),
                       ),
                       const SizedBox(height: 12),
-                      Row(
-                        children: [
-                          Icon(
-                            Icons.calendar_today,
-                            size: 16,
-                            color: widget.classColor,
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            'Due: ${widget.assignment['dueDate']}',
-                            style: TextStyle(
-                              color: Colors.grey.shade700,
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withAlpha(150),
+                          borderRadius: BorderRadius.circular(30),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.event_note_rounded, size: 16, color: widget.classColor),
+                            const SizedBox(width: 8),
+                            Text(
+                              'Due by ${widget.assignment['dueDate']}',
+                              style: TextStyle(
+                                color: Colors.grey.shade800,
+                                fontWeight: FontWeight.w600,
+                                fontSize: 13,
+                              ),
                             ),
-                          ),
-                          const SizedBox(width: 24),
-                          Icon(
-                            Icons.stars,
-                            size: 16,
-                            color: Colors.orange.shade700,
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            '100 points',
-                            style: TextStyle(
-                              color: Colors.orange.shade700,
-                              fontSize: 15,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
                     ],
                   ),
@@ -3662,8 +3665,12 @@ class _AssignmentInteractionScreenState
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   heroBanner,
-                  const SizedBox(height: 48),
-                  Expanded(child: _buildTeacherReviewPanel()),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      physics: const BouncingScrollPhysics(),
+                      child: _buildTeacherReviewPanel(),
+                    ),
+                  ),
                 ],
               ),
             );
@@ -4513,76 +4520,67 @@ class _AssignmentInteractionScreenState
     bool isMcq = widget.assignment['mcqData'] != null;
     int? score = AppData().mcqScores[widget.assignment['id']];
 
-    return Container(
-      padding: const EdgeInsets.all(32),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.grey.shade200),
-        boxShadow: [
-          BoxShadow(color: Colors.black.withAlpha(10), blurRadius: 20),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            isMcq ? 'Live Results Dashboard' : 'Submissions Review',
-            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          isMcq ? 'Live Results Dashboard' : 'Submissions Review',
+          style: GoogleFonts.outfit(
+            fontSize: 24,
+            fontWeight: FontWeight.bold,
+            color: const Color(0xFF2D3436),
           ),
-          const SizedBox(height: 32),
-          Container(
-            padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
-            decoration: BoxDecoration(
-              color: Colors.grey.shade50,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: Colors.grey.shade200),
+        ),
+        const SizedBox(height: 24),
+        Row(
+          children: [
+            Expanded(
+              child: _buildModernStatCard(
+                'Turned in',
+                isTurnedIn ? '1' : '0',
+                Icons.check_circle,
+                Colors.green,
+              ),
             ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                _buildReviewStat(
-                  isTurnedIn ? '1' : '0',
-                  'Turned in',
-                  Colors.green,
+            const SizedBox(width: 20),
+            Expanded(
+              child: _buildModernStatCard(
+                'Assigned',
+                '25',
+                Icons.people,
+                Colors.blue,
+              ),
+            ),
+            if (isMcq) ...[
+              const SizedBox(width: 20),
+              Expanded(
+                child: _buildModernStatCard(
+                  'Flagged',
+                  AppData().mcqFlagged[widget.assignment['id']] == true ? '1' : '0',
+                  Icons.report_problem,
+                  Colors.red,
                 ),
-                Container(height: 40, width: 1, color: Colors.grey.shade300),
-                _buildReviewStat('25', 'Assigned', Colors.orange),
-                if (!isMcq) ...[
-                  Container(height: 40, width: 1, color: Colors.grey.shade300),
-                  _buildReviewStat(
-                    score != null ? '1' : '0',
-                    'Graded',
-                    const Color(0xFF6C5CE7),
-                  ),
-                ],
-              ],
-            ),
+              ),
+            ],
+          ],
+        ),
+        const SizedBox(height: 32),
+        Text(
+          'Student Roster',
+          style: GoogleFonts.outfit(
+            fontWeight: FontWeight.bold,
+            fontSize: 18,
+            color: Colors.black87,
           ),
-          const SizedBox(height: 32),
-          const Text(
-            'Student Roster',
-            style: TextStyle(
-              fontWeight: FontWeight.bold,
-              fontSize: 16,
-              color: Colors.black87,
-            ),
-          ),
-          const SizedBox(height: 16),
-          Expanded(
-            child: ListView(
-              children: [
-                // Main Student (Student 1) - Status based on current state
-                _buildStudentRosterItem('Student 1', isTurnedIn, isMcq, score),
-                // Other Students - Mocked as Not Attended
-                _buildStudentRosterItem('Student 2', false, isMcq, null),
-                _buildStudentRosterItem('Student 3', false, isMcq, null),
-                _buildStudentRosterItem('Student 4', false, isMcq, null),
-              ],
-            ),
-          ),
-        ],
-      ),
+        ),
+        const SizedBox(height: 16),
+        _buildStudentRosterItem('Student 1', isTurnedIn, isMcq, score),
+        _buildStudentRosterItem('Student 2', false, isMcq, null),
+        _buildStudentRosterItem('Student 3', false, isMcq, null),
+        _buildStudentRosterItem('Student 4', false, isMcq, null),
+        _buildStudentRosterItem('Student 5', false, isMcq, null),
+        const SizedBox(height: 100), // Visual padding at bottom
+      ],
     );
   }
 
@@ -4667,6 +4665,37 @@ class _AssignmentInteractionScreenState
                     ],
                   ),
                 ),
+                if (DateTime.now().isBefore(widget.assignment['dueDateTime'] ?? DateTime.now().add(const Duration(days: 1))))
+                  Padding(
+                    padding: const EdgeInsets.only(left: 12),
+                    child: TextButton.icon(
+                      onPressed: () {
+                        AppData().unTerminateMcq(widget.assignment['id']);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Student attempt restored. Student can now retry the quiz.'),
+                            backgroundColor: Colors.green,
+                          ),
+                        );
+                      },
+                      icon: const Icon(Icons.refresh_rounded, size: 14, color: Colors.blue),
+                      label: const Text(
+                        'Allow Re-attempt',
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.blue,
+                        ),
+                      ),
+                      style: TextButton.styleFrom(
+                        backgroundColor: Colors.blue.shade50,
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                    ),
+                  ),
               ],
             ],
           ),
@@ -4763,6 +4792,37 @@ class _AssignmentInteractionScreenState
                   color: Colors.grey,
                 ),
               ),
+      ),
+    );
+  }
+
+  Widget _buildModernStatCard(String label, String value, IconData icon, Color color) {
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withAlpha(30)),
+        boxShadow: [
+          BoxShadow(color: color.withAlpha(10), blurRadius: 15, offset: const Offset(0, 5)),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(color: color.withAlpha(20), shape: BoxShape.circle),
+            child: Icon(icon, color: color, size: 24),
+          ),
+          const SizedBox(width: 16),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(value, style: GoogleFonts.outfit(fontSize: 26, fontWeight: FontWeight.bold, color: Colors.black87)),
+              Text(label, style: GoogleFonts.outfit(fontSize: 13, color: Colors.grey.shade600, fontWeight: FontWeight.w500)),
+            ],
+          ),
+        ],
       ),
     );
   }
