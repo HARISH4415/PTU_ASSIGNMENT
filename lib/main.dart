@@ -85,6 +85,8 @@ class AppData extends ChangeNotifier {
   Map<String, List<String>> assignmentComments = {};
   Map<String, int> mcqScores = {};
   Map<String, Map<int, int>> mcqStudentAnswers = {};
+  Map<String, int> assignmentSubmissionCounts = {};
+  Map<String, int> assignmentUnsubmitCounts = {};
   Map<String, bool> mcqFlagged = {}; // Stores assignmentId -> whether flagged for cheating
 
   void submitMcqQuiz(
@@ -168,10 +170,22 @@ class AppData extends ChangeNotifier {
   }
 
   void toggleTurnIn(String assignmentId) {
-    // Quick mock for status
     for (var list in classAssignments.values) {
       for (var a in list) {
         if (a['id'] == assignmentId) {
+          bool currentlyDone = a['isDone'] ?? false;
+          if (!currentlyDone) {
+            // Trying to Submit
+            int submitCount = assignmentSubmissionCounts[assignmentId] ?? 0;
+            if (submitCount >= 2) return; // Block further submissions
+            assignmentSubmissionCounts[assignmentId] = submitCount + 1;
+          } else {
+            // Trying to Unsubmit (Undone)
+            int unsubmitCount = assignmentUnsubmitCounts[assignmentId] ?? 0;
+            if (unsubmitCount >= 1) return; // Block if already used the one undo chance
+            assignmentUnsubmitCounts[assignmentId] = unsubmitCount + 1;
+            assignmentSubmissions.remove(assignmentId); // Clear old files on undone
+          }
           a['isDone'] = !a['isDone'];
           notifyListeners();
           return;
@@ -181,7 +195,11 @@ class AppData extends ChangeNotifier {
   }
 
   void submitFiles(String assignmentId, List<PlatformFile> files) {
-    assignmentSubmissions.putIfAbsent(assignmentId, () => []).addAll(files);
+    // Only keep the first file if multiple were somehow provided, 
+    // and replace any existing submissions per the 'one file' rule.
+    if (files.isNotEmpty) {
+      assignmentSubmissions[assignmentId] = [files.first];
+    }
     notifyListeners();
   }
 
@@ -757,7 +775,7 @@ class _McqCentralViewState extends State<McqCentralView> {
                                         ),
                                         const SizedBox(height: 4),
                                         Text(
-                                          '${cls['title']}  •  Due: ${a['dueDate']}  •  ${a['mcqData'].length} Questions',
+                                          '${cls['title']}\nStart: ${a['startDateTime']?.toString().substring(0, 16) ?? 'N/A'}  •  End: ${a['dueDateTime']?.toString().substring(0, 16) ?? a['dueDate']}  •  ${a['mcqData'].length} Questions',
                                           style: TextStyle(
                                             color: Colors.grey.shade600,
                                           ),
@@ -2648,7 +2666,9 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                                   ),
                                   const SizedBox(height: 4),
                                   Text(
-                                    '${cls['title']}  •  Due: ${a['dueDate']}  •  ${a['year']} ${a['semester']}',
+                                    (a['startDateTime'] != null && a['dueDateTime'] != null)
+                                        ? '${cls['title']}\nWindow: ${a['startDateTime'].toString().substring(0, 16)} to ${a['dueDateTime'].toString().substring(0, 16)}  •  ${a['year']} ${a['semester']}'
+                                        : '${cls['title']}  •  Due: ${a['dueDate']}  •  ${a['year']} ${a['semester']}',
                                     style: TextStyle(
                                       color: Colors.grey.shade600,
                                     ),
@@ -2711,7 +2731,8 @@ class _AssignmentsViewState extends State<AssignmentsView> {
 
   void _openCreateAssignmentDialog(BuildContext context) {
     TextEditingController titleCtrl = TextEditingController();
-    TextEditingController dateCtrl = TextEditingController(text: 'Nov 01');
+    DateTime startDateTime = DateTime.now();
+    DateTime endDateTime = DateTime.now().add(const Duration(days: 7));
     String? selectedClassId = AppData().classes.first['id'];
     String selectedYear = '1st Year';
     String selectedSem = 'Sem 1';
@@ -2818,12 +2839,78 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                         ),
                       ),
                       const SizedBox(height: 16),
-                      TextField(
-                        controller: dateCtrl,
-                        decoration: const InputDecoration(
-                          labelText: 'Due Date',
-                          border: OutlineInputBorder(),
+                      ListTile(
+                        shape: RoundedRectangleBorder(
+                          side: BorderSide(color: Colors.grey.shade400),
+                          borderRadius: BorderRadius.circular(4),
                         ),
+                        title: Text(
+                          'Start: ${startDateTime.toString().substring(0, 16)}',
+                        ),
+                        trailing: const Icon(Icons.calendar_month),
+                        onTap: () async {
+                          DateTime? date = await showDatePicker(
+                            context: ctx,
+                            initialDate: startDateTime,
+                            firstDate: DateTime.now().subtract(const Duration(days: 365)),
+                            lastDate: DateTime(2030),
+                          );
+                          if (date != null) {
+                            TimeOfDay? time = await showTimePicker(
+                              context: ctx,
+                              initialTime: TimeOfDay.fromDateTime(
+                                startDateTime,
+                              ),
+                            );
+                            if (time != null) {
+                              setDialogState(() {
+                                startDateTime = DateTime(
+                                  date.year,
+                                  date.month,
+                                  date.day,
+                                  time.hour,
+                                  time.minute,
+                                );
+                              });
+                            }
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 16),
+                      ListTile(
+                        shape: RoundedRectangleBorder(
+                          side: BorderSide(color: Colors.grey.shade400),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        title: Text(
+                          'End: ${endDateTime.toString().substring(0, 16)}',
+                        ),
+                        trailing: const Icon(Icons.calendar_month),
+                        onTap: () async {
+                          DateTime? date = await showDatePicker(
+                            context: ctx,
+                            initialDate: endDateTime,
+                            firstDate: startDateTime,
+                            lastDate: DateTime(2030),
+                          );
+                          if (date != null) {
+                            TimeOfDay? time = await showTimePicker(
+                              context: ctx,
+                              initialTime: TimeOfDay.fromDateTime(endDateTime),
+                            );
+                            if (time != null) {
+                              setDialogState(() {
+                                endDateTime = DateTime(
+                                  date.year,
+                                  date.month,
+                                  date.day,
+                                  time.hour,
+                                  time.minute,
+                                );
+                              });
+                            }
+                          }
+                        },
                       ),
                       const SizedBox(height: 16),
                       OutlinedButton.icon(
@@ -2857,11 +2944,13 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                       AppData().addAssignment(
                         selectedClassId!,
                         titleCtrl.text,
-                        dateCtrl.text,
+                        endDateTime.toString().substring(0, 16),
                         year: selectedYear,
                         semester: selectedSem,
                         file: pickedFile,
                         mcqData: mcqData,
+                        startDateTime: startDateTime,
+                        dueDateTime: endDateTime,
                       );
                       Navigator.pop(ctx);
                       setState(() {}); // refresh global list
@@ -3043,7 +3132,9 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                                               ),
                                               const SizedBox(height: 4),
                                               Text(
-                                                'Due: ${a['dueDate']}  •  ${a['year']} ${a['semester']}',
+                                                (a['startDateTime'] != null && a['dueDateTime'] != null)
+                                                    ? 'Window: ${a['startDateTime'].toString().substring(0, 16)} to ${a['dueDateTime'].toString().substring(0, 16)}  •  ${a['year']} ${a['semester']}'
+                                                    : 'Due: ${a['dueDate']}  •  ${a['year']} ${a['semester']}',
                                                 style: TextStyle(
                                                   color: Colors.grey.shade600,
                                                 ),
@@ -3179,7 +3270,8 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
 
   void _openCreateAssignmentDialog(BuildContext context, String classId) {
     TextEditingController titleCtrl = TextEditingController();
-    TextEditingController dateCtrl = TextEditingController(text: 'Oct 30');
+    DateTime startDateTime = DateTime.now();
+    DateTime endDateTime = DateTime.now().add(const Duration(days: 7));
     String selectedYear = '1st Year';
     String selectedSem = 'Sem 1';
     PlatformFile? pickedFile;
@@ -3260,12 +3352,78 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                       ),
                     ),
                     const SizedBox(height: 16),
-                    TextField(
-                      controller: dateCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'Due Date',
-                        border: OutlineInputBorder(),
+                    ListTile(
+                      shape: RoundedRectangleBorder(
+                        side: BorderSide(color: Colors.grey.shade400),
+                        borderRadius: BorderRadius.circular(4),
                       ),
+                      title: Text(
+                        'Start: ${startDateTime.toString().substring(0, 16)}',
+                      ),
+                      trailing: const Icon(Icons.calendar_month),
+                      onTap: () async {
+                        DateTime? date = await showDatePicker(
+                          context: ctx,
+                          initialDate: startDateTime,
+                          firstDate: DateTime.now().subtract(const Duration(days: 365)),
+                          lastDate: DateTime(2030),
+                        );
+                        if (date != null) {
+                          TimeOfDay? time = await showTimePicker(
+                            context: ctx,
+                            initialTime: TimeOfDay.fromDateTime(
+                              startDateTime,
+                            ),
+                          );
+                          if (time != null) {
+                            setDialogState(() {
+                              startDateTime = DateTime(
+                                date.year,
+                                date.month,
+                                date.day,
+                                time.hour,
+                                time.minute,
+                              );
+                            });
+                          }
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    ListTile(
+                      shape: RoundedRectangleBorder(
+                        side: BorderSide(color: Colors.grey.shade400),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      title: Text(
+                        'End: ${endDateTime.toString().substring(0, 16)}',
+                      ),
+                      trailing: const Icon(Icons.calendar_month),
+                      onTap: () async {
+                        DateTime? date = await showDatePicker(
+                          context: ctx,
+                          initialDate: endDateTime,
+                          firstDate: startDateTime,
+                          lastDate: DateTime(2030),
+                        );
+                        if (date != null) {
+                          TimeOfDay? time = await showTimePicker(
+                            context: ctx,
+                            initialTime: TimeOfDay.fromDateTime(endDateTime),
+                          );
+                          if (time != null) {
+                            setDialogState(() {
+                              endDateTime = DateTime(
+                                date.year,
+                                date.month,
+                                date.day,
+                                time.hour,
+                                time.minute,
+                              );
+                            });
+                          }
+                        }
+                      },
                     ),
                     const SizedBox(height: 16),
                     OutlinedButton.icon(
@@ -3296,11 +3454,13 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                       AppData().addAssignment(
                         classId,
                         titleCtrl.text,
-                        dateCtrl.text,
+                        endDateTime.toString().substring(0, 16),
                         year: selectedYear,
                         semester: selectedSem,
                         file: pickedFile,
                         mcqData: mcqData,
+                        startDateTime: startDateTime,
+                        dueDateTime: endDateTime,
                       );
                       Navigator.pop(ctx);
                       setState(() {});
@@ -3340,8 +3500,8 @@ class AssignmentInteractionScreen extends StatefulWidget {
 }
 
 class _AssignmentInteractionScreenState
-    extends State<AssignmentInteractionScreen> with WidgetsBindingObserver {
-  final TextEditingController _commentCtrl = TextEditingController();
+    extends State<AssignmentInteractionScreen>
+    with WidgetsBindingObserver {
   int currentMcqIndex = 0;
   final Map<int, int> mcqAnswers = {};
   Timer? _mcqTimer;
@@ -3350,6 +3510,7 @@ class _AssignmentInteractionScreenState
   int _backPressCount = 0;
   bool _isWarningDialogShown = false;
   bool _hasTabSwitchPending = false;
+  bool _isMcqStartPressed = false;
 
   @override
   void initState() {
@@ -3377,7 +3538,10 @@ class _AssignmentInteractionScreenState
       });
     }
 
-    if (isStudent && !isTurnedIn && widget.assignment['mcqData'] != null) {
+    if (isStudent &&
+        !isTurnedIn &&
+        widget.assignment['mcqData'] != null &&
+        _isMcqStartPressed) {
       if (startTime == null || !DateTime.now().isBefore(startTime)) {
         _startMcqTimer();
       }
@@ -3397,7 +3561,7 @@ class _AssignmentInteractionScreenState
     bool isTurnedIn = widget.assignment['isDone'] ?? false;
     bool isMcq = widget.assignment['mcqData'] != null;
 
-    if (isStudent && !isTurnedIn && isMcq) {
+    if (isStudent && !isTurnedIn && isMcq && _isMcqStartPressed) {
       if (state == AppLifecycleState.inactive ||
           state == AppLifecycleState.hidden ||
           state == AppLifecycleState.paused) {
@@ -3423,14 +3587,12 @@ class _AssignmentInteractionScreenState
     }
   }
 
-
-
   void _handleBackPress() {
     bool isStudent = AppData().currentUserRole == UserRole.student;
     bool isTurnedIn = widget.assignment['isDone'] ?? false;
     bool isMcq = widget.assignment['mcqData'] != null;
 
-    if (isStudent && !isTurnedIn && isMcq) {
+    if (isStudent && !isTurnedIn && isMcq && _isMcqStartPressed) {
       _backPressCount++;
       if (_backPressCount == 1 && !_isWarningDialogShown) {
         _isWarningDialogShown = true;
@@ -3443,7 +3605,7 @@ class _AssignmentInteractionScreenState
         _submitMcq(isFlagged: true);
       }
     } else {
-      // For non-MCQ or already finished, just pop normally
+      // For non-MCQ, already finished, or before test start, just pop normally
       Navigator.pop(context);
     }
   }
@@ -3467,8 +3629,36 @@ class _AssignmentInteractionScreenState
               Navigator.pop(ctx);
               _isWarningDialogShown = false;
             },
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF6C5CE7)),
-            child: const Text('I Understand', style: TextStyle(color: Colors.white)),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF6C5CE7),
+            ),
+            child: const Text(
+              'I Understand',
+              style: TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInstructionItem(IconData icon, String text, Color color) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: color.withAlpha(200), size: 20),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(
+                fontSize: 15,
+                color: Colors.grey.shade700,
+                height: 1.4,
+              ),
+            ),
           ),
         ],
       ),
@@ -3534,19 +3724,14 @@ class _AssignmentInteractionScreenState
 
   Future<void> _pickFiles() async {
     FilePickerResult? result = await FilePicker.platform.pickFiles(
-      allowMultiple: true,
+      allowMultiple: false,
     );
     if (result != null) {
       AppData().submitFiles(widget.assignment['id'], result.files);
     }
   }
 
-  void _addComment() {
-    if (_commentCtrl.text.isNotEmpty) {
-      AppData().addComment(widget.assignment['id'], _commentCtrl.text);
-      _commentCtrl.clear();
-    }
-  }
+
 
   @override
   Widget build(BuildContext context) {
@@ -3556,321 +3741,277 @@ class _AssignmentInteractionScreenState
     bool isMcq = widget.assignment['mcqData'] != null;
 
     return PopScope(
-      canPop: !(isStudent && !isTurnedIn && isMcq),
+      canPop: !(isStudent && !isTurnedIn && isMcq && _isMcqStartPressed),
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) return;
         _handleBackPress();
       },
       child: Scaffold(
-        appBar: AppBar(title: const Text('Assignment Details')),
+        appBar: (isStudent && !isTurnedIn && isMcq && _isMcqStartPressed)
+            ? null // Full screen for quiz after start
+            : AppBar(title: const Text('Assignment Details')),
         body: AnimatedBuilder(
-        animation: AppData(),
-        builder: (context, _) {
-          List<PlatformFile> attachedFiles =
-              AppData().assignmentSubmissions[widget.assignment['id']] ?? [];
-          List<String> comments =
-              AppData().assignmentComments[widget.assignment['id']] ?? [];
-          bool isTurnedIn = widget.assignment['isDone'] ?? false;
+          animation: AppData(),
+          builder: (context, _) {
+            List<PlatformFile> attachedFiles =
+                AppData().assignmentSubmissions[widget.assignment['id']] ?? [];
+            bool isTurnedIn = widget.assignment['isDone'] ?? false;
 
-          DateTime? dueTime = widget.assignment['dueDateTime'];
-          if (AppData().currentUserRole == UserRole.student &&
-              !isTurnedIn &&
-              dueTime != null &&
-              DateTime.now().isAfter(dueTime)) {
-            isTurnedIn = true;
-          }
+            DateTime? dueTime = widget.assignment['dueDateTime'];
+            if (AppData().currentUserRole == UserRole.student &&
+                !isTurnedIn &&
+                dueTime != null &&
+                DateTime.now().isAfter(dueTime)) {
+              isTurnedIn = true;
+            }
 
-          Widget heroBanner = Container(
-            padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [
-                  widget.classColor.withAlpha(20),
-                  widget.classColor.withAlpha(5),
-                ],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
+            Widget heroBanner = Container(
+              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    widget.classColor.withAlpha(20),
+                    widget.classColor.withAlpha(5),
+                  ],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(color: widget.classColor.withAlpha(50)),
               ),
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(color: widget.classColor.withAlpha(50)),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(20),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(20),
-                    boxShadow: [
-                      BoxShadow(
-                        color: widget.classColor.withAlpha(20),
-                        blurRadius: 10,
-                        offset: const Offset(0, 4),
-                      ),
-                    ],
-                  ),
-                  child: Icon(
-                    widget.assignment['mcqData'] != null ? Icons.quiz_outlined : Icons.assignment_outlined,
-                    color: widget.classColor,
-                    size: 28,
-                  ),
-                ),
-                const SizedBox(width: 32),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        widget.assignment['title'],
-                        style: GoogleFonts.outfit(
-                          fontSize: 28,
-                          fontWeight: FontWeight.bold,
-                          color: const Color(0xFF1A1A2E),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withAlpha(150),
-                          borderRadius: BorderRadius.circular(30),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.event_note_rounded, size: 16, color: widget.classColor),
-                            const SizedBox(width: 8),
-                            Text(
-                              'Due by ${widget.assignment['dueDate']}',
-                              style: TextStyle(
-                                color: Colors.grey.shade800,
-                                fontWeight: FontWeight.w600,
-                                fontSize: 13,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          );
-
-          if (isTeacher) {
-            return Padding(
-              padding: const EdgeInsets.all(40.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              child: Row(
                 children: [
-                  heroBanner,
+                  Container(
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: [
+                        BoxShadow(
+                          color: widget.classColor.withAlpha(20),
+                          blurRadius: 10,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: Icon(
+                      widget.assignment['mcqData'] != null
+                          ? Icons.quiz_outlined
+                          : Icons.assignment_outlined,
+                      color: widget.classColor,
+                      size: 28,
+                    ),
+                  ),
+                  const SizedBox(width: 32),
                   Expanded(
-                    child: SingleChildScrollView(
-                      physics: const BouncingScrollPhysics(),
-                      child: _buildTeacherReviewPanel(),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          widget.assignment['title'],
+                          style: GoogleFonts.outfit(
+                            fontSize: 28,
+                            fontWeight: FontWeight.bold,
+                            color: const Color(0xFF1A1A2E),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 8,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withAlpha(150),
+                            borderRadius: BorderRadius.circular(30),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.event_note_rounded,
+                                size: 16,
+                                color: widget.classColor,
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                (widget.assignment['startDateTime'] != null && widget.assignment['dueDateTime'] != null)
+                                    ? 'Window: ${widget.assignment['startDateTime'].toString().substring(0, 16)} to ${widget.assignment['dueDateTime'].toString().substring(0, 16)}'
+                                    : 'Due by ${widget.assignment['dueDate']}',
+                                style: TextStyle(
+                                  color: Colors.grey.shade800,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
               ),
             );
-          }
 
-          if (widget.assignment['mcqData'] != null) {
-            return _buildStudentMcqPanel(
-              widget.assignment['mcqData'] as List<dynamic>,
-              isTurnedIn,
-            );
-          }
+            if (isTeacher) {
+              return Padding(
+                padding: const EdgeInsets.all(40.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    heroBanner,
+                    Expanded(
+                      child: SingleChildScrollView(
+                        physics: const BouncingScrollPhysics(),
+                        child: _buildTeacherReviewPanel(),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }
 
-          return Padding(
-            padding: const EdgeInsets.all(40.0),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  flex: 3,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      heroBanner,
-                      if (widget.assignment['mcqData'] == null) ...[
-                        const SizedBox(height: 48),
-                        const Text(
-                          'Instructions',
-                          style: TextStyle(
-                            fontSize: 20,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.black87,
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        Container(
-                          padding: const EdgeInsets.all(24),
-                          decoration: BoxDecoration(
-                            color: Colors.grey.shade50,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: Colors.grey.shade200),
-                          ),
-                          child: Text(
-                            'Please review the attached material and submit your workings below in Excel format.',
-                            style: TextStyle(
-                              fontSize: 16,
-                              color: Colors.grey.shade800,
-                              height: 1.5,
-                            ),
-                          ),
-                        ),
+            if (widget.assignment['mcqData'] != null) {
+              return _buildStudentMcqPanel(
+                widget.assignment['mcqData'] as List<dynamic>,
+                isTurnedIn,
+              );
+            }
 
-                        const SizedBox(height: 48),
-                        Row(
-                          children: [
-                            Container(
-                              padding: const EdgeInsets.all(8),
-                              decoration: BoxDecoration(
-                                color: Colors.blue.shade50,
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: Icon(
-                                Icons.people_outline,
-                                color: Colors.blue.shade700,
-                              ),
-                            ),
-                            const SizedBox(width: 16),
+            return Padding(
+              padding: const EdgeInsets.all(40.0),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    flex: 3,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        heroBanner,
+                        if (widget.assignment['mcqData'] == null) ...[
+                          const SizedBox(height: 32),
+                          if (widget.assignment['instructorFileName'] != null) ...[
                             const Text(
-                              'Class Comments',
+                              'Teacher\'s Posted File',
                               style: TextStyle(
                                 fontSize: 20,
                                 fontWeight: FontWeight.bold,
                                 color: Colors.black87,
                               ),
                             ),
-                          ],
-                        ),
-                        const SizedBox(height: 24),
-                        ...comments.map(
-                          (c) => Padding(
-                            padding: const EdgeInsets.only(bottom: 20),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                CircleAvatar(
-                                  backgroundColor: Colors.grey.shade300,
-                                  child: const Icon(
-                                    Icons.person,
-                                    color: Colors.white,
+                            const SizedBox(height: 16),
+                            Container(
+                              padding: const EdgeInsets.all(20),
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                borderRadius: BorderRadius.circular(16),
+                                border: Border.all(color: Colors.grey.shade200),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withAlpha(5),
+                                    blurRadius: 10,
+                                    offset: const Offset(0, 2),
                                   ),
-                                ),
-                                const SizedBox(width: 16),
-                                Expanded(
-                                  child: Container(
-                                    padding: const EdgeInsets.all(20),
+                                ],
+                              ),
+                              child: Row(
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.all(12),
                                     decoration: BoxDecoration(
-                                      color: Colors.white,
-                                      borderRadius: const BorderRadius.only(
-                                        topRight: Radius.circular(16),
-                                        bottomRight: Radius.circular(16),
-                                        bottomLeft: Radius.circular(16),
-                                      ),
-                                      border: Border.all(
-                                        color: Colors.grey.shade200,
-                                      ),
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: Colors.black.withAlpha(5),
-                                          blurRadius: 10,
-                                          offset: const Offset(0, 2),
+                                      color: widget.classColor.withAlpha(20),
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    child: Icon(
+                                      Icons.file_present_rounded,
+                                      color: widget.classColor,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 16),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          widget.assignment['instructorFileName'],
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 16,
+                                          ),
+                                        ),
+                                        const Text(
+                                          'Assignment Reference Material',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            color: Colors.grey,
+                                          ),
                                         ),
                                       ],
                                     ),
-                                    child: Text(
-                                      c,
-                                      style: const TextStyle(
-                                        fontSize: 15,
-                                        height: 1.4,
+                                  ),
+                                  ElevatedButton.icon(
+                                    onPressed: () {},
+                                    icon: const Icon(Icons.download, size: 18),
+                                    label: const Text('Download'),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: widget.classColor,
+                                      foregroundColor: Colors.white,
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(12),
                                       ),
                                     ),
                                   ),
-                                ),
-                              ],
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 32),
+                          ],
+                          const Text(
+                            'Instructions',
+                            style: TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.black87,
                             ),
                           ),
-                        ),
-                        const SizedBox(height: 16),
-                        Row(
-                          children: [
-                            CircleAvatar(
-                              backgroundColor: widget.classColor,
-                              child: const Icon(
-                                Icons.face,
-                                color: Colors.white,
+                          const SizedBox(height: 16),
+                          Container(
+                            padding: const EdgeInsets.all(24),
+                            decoration: BoxDecoration(
+                              color: Colors.grey.shade50,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.grey.shade200),
+                            ),
+                            child: Text(
+                              'Please review the attached material and submit your workings below in Excel format.',
+                              style: TextStyle(
+                                fontSize: 16,
+                                color: Colors.grey.shade800,
+                                height: 1.5,
                               ),
                             ),
-                            const SizedBox(width: 16),
-                            Expanded(
-                              child: Container(
-                                decoration: BoxDecoration(
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: Colors.black.withAlpha(5),
-                                      blurRadius: 10,
-                                      offset: const Offset(0, 4),
-                                    ),
-                                  ],
-                                ),
-                                child: TextField(
-                                  controller: _commentCtrl,
-                                  decoration: InputDecoration(
-                                    hintText: 'Add a class comment...',
-                                    filled: true,
-                                    fillColor: Colors.white,
-                                    border: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(24),
-                                      borderSide: BorderSide.none,
-                                    ),
-                                    suffixIcon: Container(
-                                      margin: const EdgeInsets.all(4),
-                                      decoration: BoxDecoration(
-                                        color: widget.classColor,
-                                        shape: BoxShape.circle,
-                                      ),
-                                      child: IconButton(
-                                        icon: const Icon(
-                                          Icons.send,
-                                          color: Colors.white,
-                                          size: 18,
-                                        ),
-                                        onPressed: _addComment,
-                                      ),
-                                    ),
-                                    contentPadding: const EdgeInsets.symmetric(
-                                      horizontal: 24,
-                                      vertical: 16,
-                                    ),
-                                  ),
-                                  onSubmitted: (_) => _addComment(),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
+                          ),
+
+                        ],
                       ],
-                    ],
+                    ),
                   ),
-                ),
-                const SizedBox(width: 64),
-                Expanded(
-                  flex: 2,
-                  child: _buildStudentUploadPanel(attachedFiles, isTurnedIn),
-                ),
-              ],
-            ),
-          );
-        },
+                  const SizedBox(width: 64),
+                  Expanded(
+                    flex: 2,
+                    child: _buildStudentUploadPanel(attachedFiles, isTurnedIn),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
       ),
-    ),
-  );
-}
+    );
+  }
 
   Widget _buildStudentUploadPanel(
     List<PlatformFile> attachedFiles,
@@ -3979,7 +4120,7 @@ class _AssignmentInteractionScreenState
             );
           }),
 
-          if (!isTurnedIn) ...[
+          if (!isTurnedIn && attachedFiles.isEmpty) ...[
             InkWell(
               onTap: _pickFiles,
               borderRadius: BorderRadius.circular(16),
@@ -4023,28 +4164,85 @@ class _AssignmentInteractionScreenState
             ),
           ],
           const SizedBox(height: 32),
-          ElevatedButton(
-            onPressed: () => AppData().toggleTurnIn(widget.assignment['id']),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: isTurnedIn ? Colors.white : widget.classColor,
-              foregroundColor: isTurnedIn ? Colors.black87 : Colors.white,
-              elevation: isTurnedIn ? 0 : 4,
-              shadowColor: widget.classColor.withAlpha(100),
-              side: isTurnedIn
-                  ? BorderSide(color: Colors.grey.shade300, width: 2)
-                  : BorderSide.none,
-              padding: const EdgeInsets.symmetric(vertical: 20),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-              ),
-            ),
-            child: Text(
-              isTurnedIn
-                  ? 'Unsubmit Work'
-                  : (attachedFiles.isEmpty ? 'Mark as done' : 'Turn In Final'),
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-            ),
-          ),
+          Builder(builder: (context) {
+            int subCount =
+                AppData().assignmentSubmissionCounts[widget.assignment['id']] ??
+                0;
+            int unsubmitCount =
+                AppData().assignmentUnsubmitCounts[widget.assignment['id']] ??
+                0;
+            bool limitReached = subCount >= 2;
+            bool undoLimitReached = unsubmitCount >= 1;
+
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (!isTurnedIn)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Text(
+                      'Submissions: $subCount / 2',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: limitReached ? Colors.red : Colors.grey.shade600,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ),
+                if (isTurnedIn && undoLimitReached)
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 12),
+                    child: Text(
+                      'No more changes allowed',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Colors.red,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ),
+                ElevatedButton(
+                  onPressed:
+                      ((limitReached && !isTurnedIn) ||
+                              (undoLimitReached && isTurnedIn))
+                          ? null
+                          : () =>
+                              AppData().toggleTurnIn(widget.assignment['id']),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor:
+                        isTurnedIn ? Colors.white : widget.classColor,
+                    foregroundColor: isTurnedIn ? Colors.black87 : Colors.white,
+                    elevation: isTurnedIn ? 0 : 4,
+                    shadowColor: widget.classColor.withAlpha(100),
+                    disabledBackgroundColor: Colors.grey.shade300,
+                    side:
+                        isTurnedIn
+                            ? BorderSide(color: Colors.grey.shade300, width: 2)
+                            : BorderSide.none,
+                    padding: const EdgeInsets.symmetric(vertical: 20),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                  child: Text(
+                    isTurnedIn
+                        ? (undoLimitReached ? 'Final Submission' : 'Unsubmit Work')
+                        : (limitReached
+                            ? 'Limit Reached'
+                            : (attachedFiles.isEmpty
+                                ? 'Mark as done'
+                                : 'Turn In Final')),
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ],
+            );
+          }),
         ],
       ),
     );
@@ -4147,8 +4345,11 @@ class _AssignmentInteractionScreenState
                     shape: BoxShape.circle,
                     boxShadow: [
                       BoxShadow(
-                        color: (isFlagged || isTimedOut ? Colors.red : Colors.green)
-                            .withAlpha(30),
+                        color:
+                            (isFlagged || isTimedOut
+                                    ? Colors.red
+                                    : Colors.green)
+                                .withAlpha(30),
                         blurRadius: 20,
                       ),
                     ],
@@ -4158,14 +4359,18 @@ class _AssignmentInteractionScreenState
                         ? Icons.report_problem
                         : (isTimedOut ? Icons.timer_off : Icons.check_circle),
                     size: 80,
-                    color: (isFlagged || isTimedOut) ? Colors.red : Colors.green,
+                    color: (isFlagged || isTimedOut)
+                        ? Colors.red
+                        : Colors.green,
                   ),
                 ),
                 const SizedBox(height: 32),
                 Text(
                   isFlagged
                       ? 'Test Terminated!'
-                      : (isTimedOut ? 'Test is Over!' : 'Quiz Completed or Finished!'),
+                      : (isTimedOut
+                            ? 'Test is Over!'
+                            : 'Quiz Completed or Finished!'),
                   style: const TextStyle(
                     fontSize: 28,
                     fontWeight: FontWeight.bold,
@@ -4177,8 +4382,8 @@ class _AssignmentInteractionScreenState
                   isFlagged
                       ? 'This test was automatically terminated due to a security violation (tab switching or navigation).\nThis attempt has been flagged and submitted to your instructor.'
                       : (isTimedOut
-                          ? 'The deadline for this test has passed.\nYour progress was automatically saved and shared with your instructor.'
-                          : 'Your final answers were securely submitted to your instructor.\nYour score will be strictly visible to your teacher only.'),
+                            ? 'The deadline for this test has passed.\nYour progress was automatically saved and shared with your instructor.'
+                            : 'Your final answers were securely submitted to your instructor.\nYour score will be strictly visible to your teacher only.'),
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 16,
@@ -4187,6 +4392,161 @@ class _AssignmentInteractionScreenState
                   ),
                 ),
               ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    if (!_isMcqStartPressed) {
+      return Center(
+        child: SingleChildScrollView(
+          child: SizedBox(
+            width: 800,
+            child: Container(
+              margin: const EdgeInsets.all(40),
+              padding: const EdgeInsets.all(48),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(32),
+                border: Border.all(color: Colors.grey.shade200),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withAlpha(5),
+                    blurRadius: 30,
+                    offset: const Offset(0, 10),
+                  ),
+                ],
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: widget.classColor.withAlpha(20),
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: Icon(
+                          Icons.quiz_rounded,
+                          color: widget.classColor,
+                          size: 32,
+                        ),
+                      ),
+                      const SizedBox(width: 24),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              widget.assignment['title'],
+                              style: GoogleFonts.outfit(
+                                fontSize: 32,
+                                fontWeight: FontWeight.bold,
+                                color: const Color(0xFF1A1A2E),
+                              ),
+                            ),
+                            Text(
+                              '${mcqData.length} Questions  •  30s per question',
+                              style: TextStyle(
+                                color: Colors.grey.shade600,
+                                fontWeight: FontWeight.w500,
+                                fontSize: 16,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 48),
+                  const Text(
+                    'Examination Instructions',
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF2D3436),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  _buildInstructionItem(
+                    Icons.check_circle_outline,
+                    'Do: Ensure a stable internet connection before starting.',
+                    Colors.green,
+                  ),
+                  _buildInstructionItem(
+                    Icons.check_circle_outline,
+                    'Do: Read each question carefully before selecting an answer.',
+                    Colors.green,
+                  ),
+                  _buildInstructionItem(
+                    Icons.highlight_off_rounded,
+                    'Don\'t: Switch tabs or minimize the test window (Security Violation).',
+                    Colors.red,
+                  ),
+                  _buildInstructionItem(
+                    Icons.highlight_off_rounded,
+                    'Don\'t: Attempt to go back to the previous page during the test.',
+                    Colors.red,
+                  ),
+                  const SizedBox(height: 48),
+                  Container(
+                    padding: const EdgeInsets.all(24),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.shade50,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: Colors.orange.shade100),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.warning_amber_rounded, color: Colors.orange),
+                        const SizedBox(width: 16),
+                        const Expanded(
+                          child: Text(
+                            'Note: Once you click "Start Test", the timer will begin instantly. The test cannot be paused or restarted.',
+                            style: TextStyle(
+                              color: Color(0xFF8B4513),
+                              fontWeight: FontWeight.w600,
+                              fontSize: 14,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 48),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: () {
+                        setState(() {
+                          _isMcqStartPressed = true;
+                          _startMcqTimer();
+                        });
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: widget.classColor,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 24),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        elevation: 4,
+                        shadowColor: widget.classColor.withAlpha(100),
+                      ),
+                      child: const Text(
+                        'Start Test Now',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -4556,7 +4916,9 @@ class _AssignmentInteractionScreenState
               Expanded(
                 child: _buildModernStatCard(
                   'Flagged',
-                  AppData().mcqFlagged[widget.assignment['id']] == true ? '1' : '0',
+                  AppData().mcqFlagged[widget.assignment['id']] == true
+                      ? '1'
+                      : '0',
                   Icons.report_problem,
                   Colors.red,
                 ),
@@ -4590,7 +4952,9 @@ class _AssignmentInteractionScreenState
     bool isMcq,
     int? score,
   ) {
-    bool isFlagged = name == 'Student 1' && (AppData().mcqFlagged[widget.assignment['id']] ?? false);
+    bool isFlagged =
+        name == 'Student 1' &&
+        (AppData().mcqFlagged[widget.assignment['id']] ?? false);
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
@@ -4643,7 +5007,10 @@ class _AssignmentInteractionScreenState
               if (isFlagged) ...[
                 const SizedBox(width: 12),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 2,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.red.shade100,
                     borderRadius: BorderRadius.circular(4),
@@ -4665,7 +5032,10 @@ class _AssignmentInteractionScreenState
                     ],
                   ),
                 ),
-                if (DateTime.now().isBefore(widget.assignment['dueDateTime'] ?? DateTime.now().add(const Duration(days: 1))))
+                if (DateTime.now().isBefore(
+                  widget.assignment['dueDateTime'] ??
+                      DateTime.now().add(const Duration(days: 1)),
+                ))
                   Padding(
                     padding: const EdgeInsets.only(left: 12),
                     child: TextButton.icon(
@@ -4673,12 +5043,18 @@ class _AssignmentInteractionScreenState
                         AppData().unTerminateMcq(widget.assignment['id']);
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(
-                            content: Text('Student attempt restored. Student can now retry the quiz.'),
+                            content: Text(
+                              'Student attempt restored. Student can now retry the quiz.',
+                            ),
                             backgroundColor: Colors.green,
                           ),
                         );
                       },
-                      icon: const Icon(Icons.refresh_rounded, size: 14, color: Colors.blue),
+                      icon: const Icon(
+                        Icons.refresh_rounded,
+                        size: 14,
+                        color: Colors.blue,
+                      ),
                       label: const Text(
                         'Allow Re-attempt',
                         style: TextStyle(
@@ -4781,22 +5157,83 @@ class _AssignmentInteractionScreenState
                   ),
                 ],
               )
-            : Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Colors.grey.shade100,
-                ),
-                child: Icon(
-                  hasSubmitted ? Icons.attachment : Icons.close,
-                  color: Colors.grey,
-                ),
-              ),
+            : (hasSubmitted && !isMcq)
+                ? IconButton(
+                    icon: const Icon(Icons.folder_open, color: Colors.blue),
+                    onPressed: () {
+                      List<PlatformFile> files =
+                          AppData().assignmentSubmissions[widget
+                                  .assignment['id']] ??
+                              [];
+                      showDialog(
+                        context: context,
+                        builder: (ctx) => AlertDialog(
+                          title: Text('$name\'s Submission'),
+                          content: SizedBox(
+                            width: 400,
+                            child:
+                                files.isEmpty
+                                    ? const Text('No files submitted manually.')
+                                    : Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children:
+                                          files
+                                              .map(
+                                                (f) => ListTile(
+                                                  leading: const Icon(
+                                                    Icons.file_present,
+                                                  ),
+                                                  title: Text(f.name),
+                                                  trailing: Text(
+                                                    '${(f.size / 1024).toStringAsFixed(1)} KB',
+                                                  ),
+                                                  onTap: () {
+                                                    Navigator.pop(ctx);
+                                                    ScaffoldMessenger.of(context)
+                                                        .showSnackBar(
+                                                          SnackBar(
+                                                            content: Text(
+                                                              'Opening ${f.name}...',
+                                                            ),
+                                                          ),
+                                                        );
+                                                  },
+                                                ),
+                                              )
+                                              .toList(),
+                                    ),
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(ctx),
+                              child: const Text('Close'),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  )
+                : Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Colors.grey.shade100,
+                    ),
+                    child: Icon(
+                      hasSubmitted ? Icons.attachment : Icons.close,
+                      color: Colors.grey,
+                    ),
+                  ),
       ),
     );
   }
 
-  Widget _buildModernStatCard(String label, String value, IconData icon, Color color) {
+  Widget _buildModernStatCard(
+    String label,
+    String value,
+    IconData icon,
+    Color color,
+  ) {
     return Container(
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
@@ -4804,22 +5241,43 @@ class _AssignmentInteractionScreenState
         borderRadius: BorderRadius.circular(20),
         border: Border.all(color: color.withAlpha(30)),
         boxShadow: [
-          BoxShadow(color: color.withAlpha(10), blurRadius: 15, offset: const Offset(0, 5)),
+          BoxShadow(
+            color: color.withAlpha(10),
+            blurRadius: 15,
+            offset: const Offset(0, 5),
+          ),
         ],
       ),
       child: Row(
         children: [
           Container(
             padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(color: color.withAlpha(20), shape: BoxShape.circle),
+            decoration: BoxDecoration(
+              color: color.withAlpha(20),
+              shape: BoxShape.circle,
+            ),
             child: Icon(icon, color: color, size: 24),
           ),
           const SizedBox(width: 16),
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(value, style: GoogleFonts.outfit(fontSize: 26, fontWeight: FontWeight.bold, color: Colors.black87)),
-              Text(label, style: GoogleFonts.outfit(fontSize: 13, color: Colors.grey.shade600, fontWeight: FontWeight.w500)),
+              Text(
+                value,
+                style: GoogleFonts.outfit(
+                  fontSize: 26,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.black87,
+                ),
+              ),
+              Text(
+                label,
+                style: GoogleFonts.outfit(
+                  fontSize: 13,
+                  color: Colors.grey.shade600,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
             ],
           ),
         ],
