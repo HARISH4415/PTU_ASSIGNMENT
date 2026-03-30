@@ -9,7 +9,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:camera/camera.dart';
 
 void main() {
-  runApp(const EduPortalApp());
+  runApp(const PTU_PORTALApp());
 }
 
 // ---------------------------------------------------------
@@ -212,13 +212,26 @@ class AppData extends ChangeNotifier {
     assignmentComments.putIfAbsent(assignmentId, () => []).add(comment);
     notifyListeners();
   }
+
+  void deleteAssignment(String classId, String assignmentId) {
+    classAssignments[classId]?.removeWhere((a) => a['id'] == assignmentId);
+    // Cleanup other maps
+    assignmentSubmissions.remove(assignmentId);
+    assignmentComments.remove(assignmentId);
+    mcqScores.remove(assignmentId);
+    mcqStudentAnswers.remove(assignmentId);
+    assignmentSubmissionCounts.remove(assignmentId);
+    assignmentUnsubmitCounts.remove(assignmentId);
+    mcqFlagged.remove(assignmentId);
+    notifyListeners();
+  }
 }
 
 // ---------------------------------------------------------
 // Main App Shell
 // ---------------------------------------------------------
-class EduPortalApp extends StatelessWidget {
-  const EduPortalApp({super.key});
+class PTU_PORTALApp extends StatelessWidget {
+  const PTU_PORTALApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -226,7 +239,7 @@ class EduPortalApp extends StatelessWidget {
       animation: AppData(),
       builder: (context, _) {
         return MaterialApp(
-          title: 'EduPortal',
+          title: 'PTU',
           debugShowCheckedModeBanner: false,
           theme: ThemeData(
             colorScheme: ColorScheme.fromSeed(
@@ -275,7 +288,7 @@ class RoleSelectionScreen extends StatelessWidget {
             ),
             const SizedBox(height: 32),
             Text(
-              'Welcome to EduPortal',
+              'Welcome to PTU_PORTAL',
               style: GoogleFonts.plusJakartaSans(
                 fontSize: 32,
                 fontWeight: FontWeight.bold,
@@ -403,7 +416,7 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
                       ),
                       const SizedBox(width: 12),
                       const Text(
-                        'EduPortal',
+                        'PTU_PORTAL',
                         style: TextStyle(
                           fontSize: 22,
                           fontWeight: FontWeight.bold,
@@ -784,12 +797,27 @@ class _McqCentralViewState extends State<McqCentralView> {
                                     ),
                                   ),
                                   if (isTeacher)
-                                    const Text(
-                                      '0/25 Submitted',
-                                      style: TextStyle(
-                                        color: Color(0xFF6C5CE7),
-                                        fontWeight: FontWeight.w600,
-                                      ),
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Text(
+                                          '0/25 Submitted',
+                                          style: TextStyle(
+                                            color: Color(0xFF6C5CE7),
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        IconButton(
+                                          icon: const Icon(Icons.delete_outline,
+                                              color: Colors.red),
+                                          tooltip: 'Delete Test',
+                                          onPressed: () {
+                                            _showDeleteConfirmation(
+                                                context, cls['id'], a['id']);
+                                          },
+                                        ),
+                                      ],
                                     )
                                   else
                                     a['isDone']
@@ -811,6 +839,30 @@ class _McqCentralViewState extends State<McqCentralView> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  void _showDeleteConfirmation(
+      BuildContext context, String classId, String assignmentId) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Confirm Delete'),
+        content: const Text('Are you sure you want to delete this test? This action cannot be undone.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () {
+              AppData().deleteAssignment(classId, assignmentId);
+              Navigator.pop(ctx);
+              setState(() {});
+            },
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
       ),
     );
   }
@@ -2698,12 +2750,27 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                               ),
                             ),
                             if (isTeacher)
-                              const Text(
-                                '0/25 Submitted',
-                                style: TextStyle(
-                                  color: Color(0xFF6C5CE7),
-                                  fontWeight: FontWeight.w600,
-                                ),
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Text(
+                                    '0/25 Submitted',
+                                    style: TextStyle(
+                                      color: Color(0xFF6C5CE7),
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  IconButton(
+                                    icon: const Icon(Icons.delete_outline,
+                                        color: Colors.red),
+                                    tooltip: 'Delete Assignment',
+                                    onPressed: () {
+                                      _showDeleteConfirmation(
+                                          context, cls['id'], a['id']);
+                                    },
+                                  ),
+                                ],
                               )
                             else
                               a['isDone']
@@ -2725,6 +2792,30 @@ class _AssignmentsViewState extends State<AssignmentsView> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  void _showDeleteConfirmation(
+      BuildContext context, String classId, String assignmentId) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Confirm Delete'),
+        content: const Text('Are you sure you want to delete this assignment? This action cannot be undone.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () {
+              AppData().deleteAssignment(classId, assignmentId);
+              Navigator.pop(ctx);
+              setState(() {});
+            },
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
       ),
     );
   }
@@ -3170,15 +3261,32 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                                           ),
                                         ),
                                         if (isTeacher)
-                                          Text(
-                                            ((a['isDone'] ?? false) &&
-                                                    !(a['isMissed'] ?? false))
-                                                ? '1/25 Submitted'
-                                                : '0/25 Submitted',
-                                            style: TextStyle(
-                                              color: const Color(0xFF6C5CE7),
-                                              fontWeight: FontWeight.w600,
-                                            ),
+                                          Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Text(
+                                                ((a['isDone'] ?? false) &&
+                                                        !(a['isMissed'] ??
+                                                            false))
+                                                    ? '1/25 Submitted'
+                                                    : '0/25 Submitted',
+                                                style: const TextStyle(
+                                                  color: Color(0xFF6C5CE7),
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                              ),
+                                              const SizedBox(width: 8),
+                                              IconButton(
+                                                icon: const Icon(
+                                                    Icons.delete_outline,
+                                                    color: Colors.red,
+                                                    size: 20),
+                                                onPressed: () {
+                                                  _showDeleteConfirmation(
+                                                      context, classId, a['id']);
+                                                },
+                                              ),
+                                            ],
                                           )
                                         else if ((a['isDone'] ?? false) &&
                                             !(a['isMissed'] ?? false))
@@ -3264,6 +3372,29 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  void _showDeleteConfirmation(
+      BuildContext context, String classId, String assignmentId) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Confirm Delete'),
+        content: const Text('Are you sure you want to delete this classwork? This action cannot be undone.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () {
+              AppData().deleteAssignment(classId, assignmentId);
+              Navigator.pop(ctx);
+            },
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
       ),
     );
   }
@@ -3511,6 +3642,7 @@ class _AssignmentInteractionScreenState
   bool _isWarningDialogShown = false;
   bool _hasTabSwitchPending = false;
   bool _isMcqStartPressed = false;
+  List<dynamic> _shuffledMcqData = [];
 
   @override
   void initState() {
@@ -3692,9 +3824,58 @@ class _AssignmentInteractionScreenState
     }
   }
 
+  void _shuffleQuestionsAndOptions() {
+    final originalData = widget.assignment['mcqData'] as List<dynamic>;
+    // Create a deep-ish copy to avoid modifying original ref
+    _shuffledMcqData = originalData.map((q) => Map<String, dynamic>.from(q)).toList();
+
+    final random = Random();
+
+    for (var q in _shuffledMcqData) {
+      if (q['options'] is List) {
+        List options = List.from(q['options']);
+        // Identify correct answer before shuffling
+        dynamic ansIdx = q['answerIndex'] ?? q['answer'] ?? q['correctAnswer'] ?? q['correctIndex'];
+        String? correctAnswerText;
+        
+        if (ansIdx is int && ansIdx < options.length) {
+          correctAnswerText = options[ansIdx].toString();
+        } else if (ansIdx != null) {
+          // If it's already a string, check if it matches any option
+          String s = ansIdx.toString().toLowerCase().trim();
+          for (var opt in options) {
+            if (opt.toString().toLowerCase().trim() == s) {
+              correctAnswerText = opt.toString();
+              break;
+            }
+          }
+        }
+
+        // Shuffle options
+        options.shuffle(random);
+        q['options'] = options;
+
+        // Update correct answer index
+        if (correctAnswerText != null) {
+          for (int i = 0; i < options.length; i++) {
+            if (options[i].toString() == correctAnswerText) {
+              q['answerIndex'] = i;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    // Shuffle questions
+    _shuffledMcqData.shuffle(random);
+  }
+
   void _submitMcq({bool isFlagged = false}) {
     _mcqTimer?.cancel();
-    List<dynamic> mcqData = widget.assignment['mcqData'] as List<dynamic>;
+    List<dynamic> mcqData = _shuffledMcqData.isNotEmpty 
+        ? _shuffledMcqData 
+        : (widget.assignment['mcqData'] as List<dynamic>);
     int score = 0;
     for (int j = 0; j < mcqData.length; j++) {
       var q = mcqData[j];
@@ -3703,6 +3884,9 @@ class _AssignmentInteractionScreenState
           q['answer'] ??
           q['correctAnswer'] ??
           q['correctIndex'];
+      
+      // If it's an index, we compare it with the selected index
+      // If it's text, we compare it with the selected text
       String? expected = ans?.toString().trim().toLowerCase();
       String? selectedId = mcqAnswers[j]?.toString().trim().toLowerCase();
       String? selectedText = mcqAnswers[j] != null
@@ -3874,7 +4058,9 @@ class _AssignmentInteractionScreenState
 
             if (widget.assignment['mcqData'] != null) {
               return _buildStudentMcqPanel(
-                widget.assignment['mcqData'] as List<dynamic>,
+                _shuffledMcqData.isNotEmpty 
+                    ? _shuffledMcqData 
+                    : (widget.assignment['mcqData'] as List<dynamic>),
                 isTurnedIn,
               );
             }
@@ -4522,6 +4708,7 @@ class _AssignmentInteractionScreenState
                     child: ElevatedButton(
                       onPressed: () {
                         setState(() {
+                          _shuffleQuestionsAndOptions();
                           _isMcqStartPressed = true;
                           _startMcqTimer();
                         });
