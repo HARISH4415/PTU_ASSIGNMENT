@@ -26,12 +26,15 @@ class AppData extends ChangeNotifier {
 
   UserRole currentUserRole = UserRole.student;
   String? activeMeetingCode;
+  bool isLoggedIn = false;
+  String? loggedEmail;
+  String? loggedPhone;
 
   // Shared state
   List<Map<String, dynamic>> classes = [
     {
       'id': 'c1',
-      'title': 'Physics: Motion & Velocity',
+      'title': 'Bank: Finance & Strategy',
       'subtitle': 'Prof. Albert',
       'color': Colors.teal.shade500,
       'progress': 0.88,
@@ -47,7 +50,7 @@ class AppData extends ChangeNotifier {
     },
     {
       'id': 'c3',
-      'title': 'Computer Architecture',
+      'title': 'Computer Science: Architecture',
       'subtitle': 'Prof. Turing',
       'color': Colors.deepOrange.shade400,
       'progress': 0.60,
@@ -55,17 +58,30 @@ class AppData extends ChangeNotifier {
     },
   ];
 
+  List<Map<String, dynamic>> get filteredClasses {
+    if (currentUserRole == UserRole.student) return classes;
+    if (loggedEmail == 'ptucsc@gmail.com') {
+      return classes
+          .where((c) => c['title'].contains('Computer Science'))
+          .toList();
+    }
+    if (loggedEmail == 'ptubanktech@gmail.com') {
+      return classes.where((c) => c['title'].contains('Bank')).toList();
+    }
+    return [];
+  }
+
   Map<String, List<Map<String, dynamic>>> classAssignments = {
     'c1': [
       {
         'id': 'a1',
-        'title': 'Kinematics Worksheet',
+        'title': 'Financial Sector',
         'dueDate': 'Oct 20',
         'isDone': true,
       },
       {
         'id': 'a2',
-        'title': 'Dynamics Lab Report',
+        'title': 'Block Chain',
         'dueDate': 'Oct 28',
         'isDone': false,
       },
@@ -87,7 +103,8 @@ class AppData extends ChangeNotifier {
   Map<String, Map<int, int>> mcqStudentAnswers = {};
   Map<String, int> assignmentSubmissionCounts = {};
   Map<String, int> assignmentUnsubmitCounts = {};
-  Map<String, bool> mcqFlagged = {}; // Stores assignmentId -> whether flagged for cheating
+  Map<String, bool> mcqFlagged =
+      {}; // Stores assignmentId -> whether flagged for cheating
 
   void submitMcqQuiz(
     String assignmentId,
@@ -133,6 +150,36 @@ class AppData extends ChangeNotifier {
 
   void loginAs(UserRole role) {
     currentUserRole = role;
+    notifyListeners();
+  }
+
+  bool loginTeacher(String email, String password) {
+    if ((email == 'ptucsc@gmail.com' || email == 'ptubanktech@gmail.com') &&
+        password == 'ptu@123') {
+      isLoggedIn = true;
+      currentUserRole = UserRole.teacher;
+      loggedEmail = email;
+      notifyListeners();
+      return true;
+    }
+    return false;
+  }
+
+  bool loginStudent(String phone, String password) {
+    if (password == '30082005' || password == '18032005') {
+      isLoggedIn = true;
+      currentUserRole = UserRole.student;
+      loggedPhone = phone;
+      notifyListeners();
+      return true;
+    }
+    return false;
+  }
+
+  void logout() {
+    isLoggedIn = false;
+    loggedEmail = null;
+    loggedPhone = null;
     notifyListeners();
   }
 
@@ -182,9 +229,12 @@ class AppData extends ChangeNotifier {
           } else {
             // Trying to Unsubmit (Undone)
             int unsubmitCount = assignmentUnsubmitCounts[assignmentId] ?? 0;
-            if (unsubmitCount >= 1) return; // Block if already used the one undo chance
+            if (unsubmitCount >= 1)
+              return; // Block if already used the one undo chance
             assignmentUnsubmitCounts[assignmentId] = unsubmitCount + 1;
-            assignmentSubmissions.remove(assignmentId); // Clear old files on undone
+            assignmentSubmissions.remove(
+              assignmentId,
+            ); // Clear old files on undone
           }
           a['isDone'] = !a['isDone'];
           notifyListeners();
@@ -195,7 +245,7 @@ class AppData extends ChangeNotifier {
   }
 
   void submitFiles(String assignmentId, List<PlatformFile> files) {
-    // Only keep the first file if multiple were somehow provided, 
+    // Only keep the first file if multiple were somehow provided,
     // and replace any existing submissions per the 'one file' rule.
     if (files.isNotEmpty) {
       assignmentSubmissions[assignmentId] = [files.first];
@@ -253,7 +303,9 @@ class PTU_PORTALApp extends StatelessWidget {
             ),
             scaffoldBackgroundColor: const Color(0xFFF4F6FB),
           ),
-          home: const RoleSelectionScreen(),
+          home: AppData().isLoggedIn
+              ? const MainLayoutScreen()
+              : const LoginScreen(),
         );
       },
     );
@@ -261,114 +313,274 @@ class PTU_PORTALApp extends StatelessWidget {
 }
 
 // ---------------------------------------------------------
-// Role Selection Screen
+// Login Screen
 // ---------------------------------------------------------
-class RoleSelectionScreen extends StatelessWidget {
-  const RoleSelectionScreen({super.key});
+class LoginScreen extends StatefulWidget {
+  const LoginScreen({super.key});
+
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  final TextEditingController _idController = TextEditingController();
+  final TextEditingController _passController = TextEditingController();
+  UserRole _selectedRole = UserRole.student;
+  bool _isPasswordVisible = false;
+
+  void _handleLogin() {
+    final id = _idController.text.trim();
+    final pass = _passController.text.trim();
+
+    if (id.isEmpty || pass.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter all credentials')),
+      );
+      return;
+    }
+
+    bool success = false;
+    if (_selectedRole == UserRole.teacher) {
+      success = AppData().loginTeacher(id, pass);
+    } else {
+      success = AppData().loginStudent(id, pass);
+    }
+
+    if (success) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const MainLayoutScreen()),
+      );
+    } else {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Invalid credentials')));
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(24),
-              decoration: BoxDecoration(
-                color: const Color(0xFF6C5CE7).withAlpha(20),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(
-                Icons.auto_awesome,
-                size: 80,
-                color: Color(0xFF6C5CE7),
+      body: Row(
+        children: [
+          // Left Side - Info/Branding
+          Expanded(
+            child: Container(
+              color: const Color(0xFF6C5CE7).withAlpha(10),
+              padding: const EdgeInsets.all(60),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF6C5CE7),
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: const Icon(
+                      Icons.school_rounded,
+                      color: Colors.white,
+                      size: 40,
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                  Text(
+                    'PTU PORTAL',
+                    style: GoogleFonts.plusJakartaSans(
+                      fontSize: 40,
+                      fontWeight: FontWeight.w800,
+                      color: const Color(0xFF2D3436),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'The ultimate academic management system for modern education.',
+                    style: TextStyle(
+                      fontSize: 18,
+                      color: Colors.grey.shade600,
+                      height: 1.5,
+                    ),
+                  ),
+                  const SizedBox(height: 48),
+                  _buildBullet('Role-based access control'),
+                  _buildBullet('Real-time assignment tracking'),
+                  _buildBullet('Instant MCQ results & analytics'),
+                ],
               ),
             ),
-            const SizedBox(height: 32),
-            Text(
-              'Welcome to PTU_PORTAL',
-              style: GoogleFonts.plusJakartaSans(
-                fontSize: 32,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              'Select your portal to continue',
-              style: TextStyle(color: Colors.grey.shade600, fontSize: 16),
-            ),
-            const SizedBox(height: 48),
-            Row(
+          ),
+          // Right Side - Login Form
+          Container(
+            width: 500,
+            padding: const EdgeInsets.all(60),
+            child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _buildRoleCard(
-                  context,
-                  'Student',
-                  Icons.school,
-                  UserRole.student,
+                Text(
+                  'Welcome Back',
+                  style: GoogleFonts.plusJakartaSans(
+                    fontSize: 32,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
-                const SizedBox(width: 32),
-                _buildRoleCard(
-                  context,
-                  'Teacher',
-                  Icons.assignment_ind,
-                  UserRole.teacher,
+                const SizedBox(height: 12),
+                Text(
+                  'Please enter your details to sign in.',
+                  style: TextStyle(color: Colors.grey.shade500),
+                ),
+                const SizedBox(height: 40),
+                // Role Toggle
+                Container(
+                  padding: const EdgeInsets.all(4),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    children: [
+                      _buildRoleTab('Student', UserRole.student),
+                      _buildRoleTab('Teacher', UserRole.teacher),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 32),
+                // Input Fields
+                _buildLabel(
+                  _selectedRole == UserRole.teacher
+                      ? 'Email Address'
+                      : 'Phone Number',
+                ),
+                TextField(
+                  controller: _idController,
+                  decoration: InputDecoration(
+                    hintText: _selectedRole == UserRole.teacher
+                        ? 'ptucsc@gmail.com'
+                        : 'Enter phone number',
+                    prefixIcon: Icon(
+                      _selectedRole == UserRole.teacher
+                          ? Icons.alternate_email
+                          : Icons.phone,
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 24),
+                _buildLabel('Password'),
+                TextField(
+                  controller: _passController,
+                  obscureText: !_isPasswordVisible,
+                  decoration: InputDecoration(
+                    hintText: '••••••••',
+                    prefixIcon: const Icon(Icons.lock_outline),
+                    suffixIcon: IconButton(
+                      icon: Icon(
+                        _isPasswordVisible
+                            ? Icons.visibility
+                            : Icons.visibility_off,
+                      ),
+                      onPressed: () => setState(
+                        () => _isPasswordVisible = !_isPasswordVisible,
+                      ),
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: () {},
+                    child: const Text('Forgot Password?'),
+                  ),
+                ),
+                const SizedBox(height: 32),
+                ElevatedButton(
+                  onPressed: _handleLogin,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF6C5CE7),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 20),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  child: const Text(
+                    'Sign In',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
                 ),
               ],
             ),
-          ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRoleTab(String label, UserRole role) {
+    bool isSelected = _selectedRole == role;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => setState(() => _selectedRole = role),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          decoration: BoxDecoration(
+            color: isSelected ? Colors.white : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+            boxShadow: isSelected
+                ? [
+                    BoxShadow(
+                      color: Colors.black.withAlpha(5),
+                      blurRadius: 4,
+                      offset: const Offset(0, 2),
+                    ),
+                  ]
+                : null,
+          ),
+          child: Text(
+            label,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+              color: isSelected
+                  ? const Color(0xFF6C5CE7)
+                  : Colors.grey.shade600,
+            ),
+          ),
         ),
       ),
     );
   }
 
-  Widget _buildRoleCard(
-    BuildContext context,
-    String title,
-    IconData icon,
-    UserRole role,
-  ) {
-    return InkWell(
-      onTap: () {
-        AppData().loginAs(role);
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (_) => const MainLayoutScreen()),
-        );
-      },
-      borderRadius: BorderRadius.circular(16),
-      child: Container(
-        width: 180,
-        height: 200,
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: Colors.grey.shade200),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withAlpha(10),
-              blurRadius: 20,
-              offset: const Offset(0, 10),
-            ),
-          ],
-        ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            CircleAvatar(
-              radius: 40,
-              backgroundColor: const Color(0xFF6C5CE7).withAlpha(15),
-              child: Icon(icon, size: 40, color: const Color(0xFF6C5CE7)),
-            ),
-            const SizedBox(height: 24),
-            Text(
-              title,
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-            ),
-          ],
-        ),
+  Widget _buildLabel(String text) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8.0, left: 4),
+      child: Text(
+        text,
+        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+      ),
+    );
+  }
+
+  Widget _buildBullet(String text) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Row(
+        children: [
+          const Icon(Icons.check_circle, color: Color(0xFF6C5CE7), size: 20),
+          const SizedBox(width: 12),
+          Text(
+            text,
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
+          ),
+        ],
       ),
     );
   }
@@ -470,12 +682,13 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
                 Padding(
                   padding: const EdgeInsets.all(24.0),
                   child: OutlinedButton.icon(
-                    onPressed: () => Navigator.pushReplacement(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => const RoleSelectionScreen(),
-                      ),
-                    ),
+                    onPressed: () {
+                      AppData().logout();
+                      Navigator.pushReplacement(
+                        context,
+                        MaterialPageRoute(builder: (_) => const LoginScreen()),
+                      );
+                    },
                     icon: const Icon(
                       Icons.logout,
                       size: 18,
@@ -590,6 +803,9 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
 
   Widget _buildUserInfo() {
     UserRole role = AppData().currentUserRole;
+    String name = role == UserRole.teacher
+        ? (AppData().loggedEmail ?? 'Teacher')
+        : (AppData().loggedPhone ?? 'Student');
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24.0),
       child: Row(
@@ -607,21 +823,26 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
             ),
           ),
           const SizedBox(width: 12),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                role == UserRole.teacher ? 'Prof. Alan Turing' : 'Steve Rogers',
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 14,
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                  ),
                 ),
-              ),
-              Text(
-                role == UserRole.teacher ? 'Teacher Portal' : 'Student Portal',
-                style: TextStyle(color: Colors.grey.shade500, fontSize: 12),
-              ),
-            ],
+                Text(
+                  role == UserRole.teacher
+                      ? 'Teacher Portal'
+                      : 'Student Portal',
+                  style: TextStyle(color: Colors.grey.shade500, fontSize: 12),
+                ),
+              ],
+            ),
           ),
         ],
       ),
@@ -683,7 +904,7 @@ class _McqCentralViewState extends State<McqCentralView> {
     bool isTeacher = AppData().currentUserRole == UserRole.teacher;
     // Flatten assignments that have mcqData
     List<Map<String, dynamic>> allMcqTests = [];
-    for (var cls in AppData().classes) {
+    for (var cls in AppData().filteredClasses) {
       var assigns = AppData().classAssignments[cls['id']] ?? [];
       for (var a in assigns) {
         if (a['mcqData'] != null) {
@@ -809,12 +1030,17 @@ class _McqCentralViewState extends State<McqCentralView> {
                                         ),
                                         const SizedBox(width: 12),
                                         IconButton(
-                                          icon: const Icon(Icons.delete_outline,
-                                              color: Colors.red),
+                                          icon: const Icon(
+                                            Icons.delete_outline,
+                                            color: Colors.red,
+                                          ),
                                           tooltip: 'Delete Test',
                                           onPressed: () {
                                             _showDeleteConfirmation(
-                                                context, cls['id'], a['id']);
+                                              context,
+                                              cls['id'],
+                                              a['id'],
+                                            );
                                           },
                                         ),
                                       ],
@@ -844,15 +1070,22 @@ class _McqCentralViewState extends State<McqCentralView> {
   }
 
   void _showDeleteConfirmation(
-      BuildContext context, String classId, String assignmentId) {
+    BuildContext context,
+    String classId,
+    String assignmentId,
+  ) {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Confirm Delete'),
-        content: const Text('Are you sure you want to delete this test? This action cannot be undone.'),
+        content: const Text(
+          'Are you sure you want to delete this test? This action cannot be undone.',
+        ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
           TextButton(
             onPressed: () {
               AppData().deleteAssignment(classId, assignmentId);
@@ -872,7 +1105,7 @@ class _McqCentralViewState extends State<McqCentralView> {
     TextEditingController timeCtrl = TextEditingController(text: '30');
     DateTime startDateTime = DateTime.now();
     DateTime endDateTime = DateTime.now().add(const Duration(minutes: 30));
-    String? selectedClassId = AppData().classes.first['id'];
+    String? selectedClassId = AppData().filteredClasses.first['id'];
     List<dynamic>? mcqData;
 
     showDialog(
@@ -897,7 +1130,7 @@ class _McqCentralViewState extends State<McqCentralView> {
                     children: [
                       DropdownButtonFormField<String>(
                         value: selectedClassId,
-                        items: AppData().classes
+                        items: AppData().filteredClasses
                             .map(
                               (c) => DropdownMenuItem<String>(
                                 value: c['id'],
@@ -1238,7 +1471,7 @@ class DashboardView extends StatelessWidget {
                             ),
                           ),
                           const SizedBox(height: 24),
-                          ...AppData().classes.map(
+                          ...AppData().filteredClasses.map(
                             (c) => Padding(
                               padding: const EdgeInsets.only(bottom: 16),
                               child: Row(
@@ -1343,7 +1576,7 @@ class DashboardView extends StatelessWidget {
                           const SizedBox(height: 24),
                           _buildLiveClassItem(
                             'PH',
-                            'Physics',
+                            'Bank',
                             'Motion',
                             Colors.teal,
                           ),
@@ -1655,7 +1888,7 @@ class CoursesView extends StatelessWidget {
           const SizedBox(height: 32),
           Expanded(
             child: GridView.builder(
-              itemCount: AppData().classes.length,
+              itemCount: AppData().filteredClasses.length,
               gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                 crossAxisCount: 3,
                 crossAxisSpacing: 32,
@@ -1663,7 +1896,7 @@ class CoursesView extends StatelessWidget {
                 childAspectRatio: 1.3,
               ),
               itemBuilder: (context, index) {
-                final cls = AppData().classes[index];
+                final cls = AppData().filteredClasses[index];
                 return GestureDetector(
                   onTap: () {
                     // We can navigate internally or push a route.
@@ -2619,7 +2852,7 @@ class _AssignmentsViewState extends State<AssignmentsView> {
     bool isTeacher = AppData().currentUserRole == UserRole.teacher;
     // Flatten assignments
     List<Map<String, dynamic>> allAssignments = [];
-    for (var cls in AppData().classes) {
+    for (var cls in AppData().filteredClasses) {
       var assigns = AppData().classAssignments[cls['id']] ?? [];
       for (var a in assigns) {
         if (a['mcqData'] == null) {
@@ -2718,7 +2951,8 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                                   ),
                                   const SizedBox(height: 4),
                                   Text(
-                                    (a['startDateTime'] != null && a['dueDateTime'] != null)
+                                    (a['startDateTime'] != null &&
+                                            a['dueDateTime'] != null)
                                         ? '${cls['title']}\nWindow: ${a['startDateTime'].toString().substring(0, 16)} to ${a['dueDateTime'].toString().substring(0, 16)}  •  ${a['year']} ${a['semester']}'
                                         : '${cls['title']}  •  Due: ${a['dueDate']}  •  ${a['year']} ${a['semester']}',
                                     style: TextStyle(
@@ -2762,12 +2996,17 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                                   ),
                                   const SizedBox(width: 12),
                                   IconButton(
-                                    icon: const Icon(Icons.delete_outline,
-                                        color: Colors.red),
+                                    icon: const Icon(
+                                      Icons.delete_outline,
+                                      color: Colors.red,
+                                    ),
                                     tooltip: 'Delete Assignment',
                                     onPressed: () {
                                       _showDeleteConfirmation(
-                                          context, cls['id'], a['id']);
+                                        context,
+                                        cls['id'],
+                                        a['id'],
+                                      );
                                     },
                                   ),
                                 ],
@@ -2797,15 +3036,22 @@ class _AssignmentsViewState extends State<AssignmentsView> {
   }
 
   void _showDeleteConfirmation(
-      BuildContext context, String classId, String assignmentId) {
+    BuildContext context,
+    String classId,
+    String assignmentId,
+  ) {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Confirm Delete'),
-        content: const Text('Are you sure you want to delete this assignment? This action cannot be undone.'),
+        content: const Text(
+          'Are you sure you want to delete this assignment? This action cannot be undone.',
+        ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
           TextButton(
             onPressed: () {
               AppData().deleteAssignment(classId, assignmentId);
@@ -2824,7 +3070,7 @@ class _AssignmentsViewState extends State<AssignmentsView> {
     TextEditingController titleCtrl = TextEditingController();
     DateTime startDateTime = DateTime.now();
     DateTime endDateTime = DateTime.now().add(const Duration(days: 7));
-    String? selectedClassId = AppData().classes.first['id'];
+    String? selectedClassId = AppData().filteredClasses.first['id'];
     String selectedYear = '1st Year';
     String selectedSem = 'Sem 1';
     PlatformFile? pickedFile;
@@ -2906,7 +3152,7 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                       const SizedBox(height: 16),
                       DropdownButtonFormField<String>(
                         value: selectedClassId,
-                        items: AppData().classes
+                        items: AppData().filteredClasses
                             .map(
                               (c) => DropdownMenuItem<String>(
                                 value: c['id'],
@@ -2943,7 +3189,9 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                           DateTime? date = await showDatePicker(
                             context: ctx,
                             initialDate: startDateTime,
-                            firstDate: DateTime.now().subtract(const Duration(days: 365)),
+                            firstDate: DateTime.now().subtract(
+                              const Duration(days: 365),
+                            ),
                             lastDate: DateTime(2030),
                           );
                           if (date != null) {
@@ -3223,7 +3471,9 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                                               ),
                                               const SizedBox(height: 4),
                                               Text(
-                                                (a['startDateTime'] != null && a['dueDateTime'] != null)
+                                                (a['startDateTime'] != null &&
+                                                        a['dueDateTime'] !=
+                                                            null)
                                                     ? 'Window: ${a['startDateTime'].toString().substring(0, 16)} to ${a['dueDateTime'].toString().substring(0, 16)}  •  ${a['year']} ${a['semester']}'
                                                     : 'Due: ${a['dueDate']}  •  ${a['year']} ${a['semester']}',
                                                 style: TextStyle(
@@ -3278,12 +3528,16 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                                               const SizedBox(width: 8),
                                               IconButton(
                                                 icon: const Icon(
-                                                    Icons.delete_outline,
-                                                    color: Colors.red,
-                                                    size: 20),
+                                                  Icons.delete_outline,
+                                                  color: Colors.red,
+                                                  size: 20,
+                                                ),
                                                 onPressed: () {
                                                   _showDeleteConfirmation(
-                                                      context, classId, a['id']);
+                                                    context,
+                                                    classId,
+                                                    a['id'],
+                                                  );
                                                 },
                                               ),
                                             ],
@@ -3377,15 +3631,22 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
   }
 
   void _showDeleteConfirmation(
-      BuildContext context, String classId, String assignmentId) {
+    BuildContext context,
+    String classId,
+    String assignmentId,
+  ) {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Confirm Delete'),
-        content: const Text('Are you sure you want to delete this classwork? This action cannot be undone.'),
+        content: const Text(
+          'Are you sure you want to delete this classwork? This action cannot be undone.',
+        ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
           TextButton(
             onPressed: () {
               AppData().deleteAssignment(classId, assignmentId);
@@ -3496,15 +3757,15 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                         DateTime? date = await showDatePicker(
                           context: ctx,
                           initialDate: startDateTime,
-                          firstDate: DateTime.now().subtract(const Duration(days: 365)),
+                          firstDate: DateTime.now().subtract(
+                            const Duration(days: 365),
+                          ),
                           lastDate: DateTime(2030),
                         );
                         if (date != null) {
                           TimeOfDay? time = await showTimePicker(
                             context: ctx,
-                            initialTime: TimeOfDay.fromDateTime(
-                              startDateTime,
-                            ),
+                            initialTime: TimeOfDay.fromDateTime(startDateTime),
                           );
                           if (time != null) {
                             setDialogState(() {
@@ -3827,7 +4088,9 @@ class _AssignmentInteractionScreenState
   void _shuffleQuestionsAndOptions() {
     final originalData = widget.assignment['mcqData'] as List<dynamic>;
     // Create a deep-ish copy to avoid modifying original ref
-    _shuffledMcqData = originalData.map((q) => Map<String, dynamic>.from(q)).toList();
+    _shuffledMcqData = originalData
+        .map((q) => Map<String, dynamic>.from(q))
+        .toList();
 
     final random = Random();
 
@@ -3835,9 +4098,13 @@ class _AssignmentInteractionScreenState
       if (q['options'] is List) {
         List options = List.from(q['options']);
         // Identify correct answer before shuffling
-        dynamic ansIdx = q['answerIndex'] ?? q['answer'] ?? q['correctAnswer'] ?? q['correctIndex'];
+        dynamic ansIdx =
+            q['answerIndex'] ??
+            q['answer'] ??
+            q['correctAnswer'] ??
+            q['correctIndex'];
         String? correctAnswerText;
-        
+
         if (ansIdx is int && ansIdx < options.length) {
           correctAnswerText = options[ansIdx].toString();
         } else if (ansIdx != null) {
@@ -3873,8 +4140,8 @@ class _AssignmentInteractionScreenState
 
   void _submitMcq({bool isFlagged = false}) {
     _mcqTimer?.cancel();
-    List<dynamic> mcqData = _shuffledMcqData.isNotEmpty 
-        ? _shuffledMcqData 
+    List<dynamic> mcqData = _shuffledMcqData.isNotEmpty
+        ? _shuffledMcqData
         : (widget.assignment['mcqData'] as List<dynamic>);
     int score = 0;
     for (int j = 0; j < mcqData.length; j++) {
@@ -3884,7 +4151,7 @@ class _AssignmentInteractionScreenState
           q['answer'] ??
           q['correctAnswer'] ??
           q['correctIndex'];
-      
+
       // If it's an index, we compare it with the selected index
       // If it's text, we compare it with the selected text
       String? expected = ans?.toString().trim().toLowerCase();
@@ -3914,8 +4181,6 @@ class _AssignmentInteractionScreenState
       AppData().submitFiles(widget.assignment['id'], result.files);
     }
   }
-
-
 
   @override
   Widget build(BuildContext context) {
@@ -4019,7 +4284,9 @@ class _AssignmentInteractionScreenState
                               ),
                               const SizedBox(width: 8),
                               Text(
-                                (widget.assignment['startDateTime'] != null && widget.assignment['dueDateTime'] != null)
+                                (widget.assignment['startDateTime'] != null &&
+                                        widget.assignment['dueDateTime'] !=
+                                            null)
                                     ? 'Window: ${widget.assignment['startDateTime'].toString().substring(0, 16)} to ${widget.assignment['dueDateTime'].toString().substring(0, 16)}'
                                     : 'Due by ${widget.assignment['dueDate']}',
                                 style: TextStyle(
@@ -4058,8 +4325,8 @@ class _AssignmentInteractionScreenState
 
             if (widget.assignment['mcqData'] != null) {
               return _buildStudentMcqPanel(
-                _shuffledMcqData.isNotEmpty 
-                    ? _shuffledMcqData 
+                _shuffledMcqData.isNotEmpty
+                    ? _shuffledMcqData
                     : (widget.assignment['mcqData'] as List<dynamic>),
                 isTurnedIn,
               );
@@ -4078,7 +4345,8 @@ class _AssignmentInteractionScreenState
                         heroBanner,
                         if (widget.assignment['mcqData'] == null) ...[
                           const SizedBox(height: 32),
-                          if (widget.assignment['instructorFileName'] != null) ...[
+                          if (widget.assignment['instructorFileName'] !=
+                              null) ...[
                             const Text(
                               'Teacher\'s Posted File',
                               style: TextStyle(
@@ -4122,7 +4390,8 @@ class _AssignmentInteractionScreenState
                                           CrossAxisAlignment.start,
                                       children: [
                                         Text(
-                                          widget.assignment['instructorFileName'],
+                                          widget
+                                              .assignment['instructorFileName'],
                                           style: const TextStyle(
                                             fontWeight: FontWeight.bold,
                                             fontSize: 16,
@@ -4180,7 +4449,6 @@ class _AssignmentInteractionScreenState
                               ),
                             ),
                           ),
-
                         ],
                       ],
                     ),
@@ -4350,85 +4618,93 @@ class _AssignmentInteractionScreenState
             ),
           ],
           const SizedBox(height: 32),
-          Builder(builder: (context) {
-            int subCount =
-                AppData().assignmentSubmissionCounts[widget.assignment['id']] ??
-                0;
-            int unsubmitCount =
-                AppData().assignmentUnsubmitCounts[widget.assignment['id']] ??
-                0;
-            bool limitReached = subCount >= 2;
-            bool undoLimitReached = unsubmitCount >= 1;
+          Builder(
+            builder: (context) {
+              int subCount =
+                  AppData().assignmentSubmissionCounts[widget
+                      .assignment['id']] ??
+                  0;
+              int unsubmitCount =
+                  AppData().assignmentUnsubmitCounts[widget.assignment['id']] ??
+                  0;
+              bool limitReached = subCount >= 2;
+              bool undoLimitReached = unsubmitCount >= 1;
 
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (!isTurnedIn)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (!isTurnedIn)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: Text(
+                        'Submissions: $subCount / 2',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: limitReached
+                              ? Colors.red
+                              : Colors.grey.shade600,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ),
+                  if (isTurnedIn && undoLimitReached)
+                    const Padding(
+                      padding: EdgeInsets.only(bottom: 12),
+                      child: Text(
+                        'No more changes allowed',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.red,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                  ElevatedButton(
+                    onPressed:
+                        ((limitReached && !isTurnedIn) ||
+                            (undoLimitReached && isTurnedIn))
+                        ? null
+                        : () => AppData().toggleTurnIn(widget.assignment['id']),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: isTurnedIn
+                          ? Colors.white
+                          : widget.classColor,
+                      foregroundColor: isTurnedIn
+                          ? Colors.black87
+                          : Colors.white,
+                      elevation: isTurnedIn ? 0 : 4,
+                      shadowColor: widget.classColor.withAlpha(100),
+                      disabledBackgroundColor: Colors.grey.shade300,
+                      side: isTurnedIn
+                          ? BorderSide(color: Colors.grey.shade300, width: 2)
+                          : BorderSide.none,
+                      padding: const EdgeInsets.symmetric(vertical: 20),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                    ),
                     child: Text(
-                      'Submissions: $subCount / 2',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: limitReached ? Colors.red : Colors.grey.shade600,
+                      isTurnedIn
+                          ? (undoLimitReached
+                                ? 'Final Submission'
+                                : 'Unsubmit Work')
+                          : (limitReached
+                                ? 'Limit Reached'
+                                : (attachedFiles.isEmpty
+                                      ? 'Mark as done'
+                                      : 'Turn In Final')),
+                      style: const TextStyle(
+                        fontSize: 16,
                         fontWeight: FontWeight.bold,
-                        fontSize: 14,
                       ),
                     ),
                   ),
-                if (isTurnedIn && undoLimitReached)
-                  const Padding(
-                    padding: EdgeInsets.only(bottom: 12),
-                    child: Text(
-                      'No more changes allowed',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: Colors.red,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 13,
-                      ),
-                    ),
-                  ),
-                ElevatedButton(
-                  onPressed:
-                      ((limitReached && !isTurnedIn) ||
-                              (undoLimitReached && isTurnedIn))
-                          ? null
-                          : () =>
-                              AppData().toggleTurnIn(widget.assignment['id']),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor:
-                        isTurnedIn ? Colors.white : widget.classColor,
-                    foregroundColor: isTurnedIn ? Colors.black87 : Colors.white,
-                    elevation: isTurnedIn ? 0 : 4,
-                    shadowColor: widget.classColor.withAlpha(100),
-                    disabledBackgroundColor: Colors.grey.shade300,
-                    side:
-                        isTurnedIn
-                            ? BorderSide(color: Colors.grey.shade300, width: 2)
-                            : BorderSide.none,
-                    padding: const EdgeInsets.symmetric(vertical: 20),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                  ),
-                  child: Text(
-                    isTurnedIn
-                        ? (undoLimitReached ? 'Final Submission' : 'Unsubmit Work')
-                        : (limitReached
-                            ? 'Limit Reached'
-                            : (attachedFiles.isEmpty
-                                ? 'Mark as done'
-                                : 'Turn In Final')),
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ],
-            );
-          }),
+                ],
+              );
+            },
+          ),
         ],
       ),
     );
@@ -4687,7 +4963,10 @@ class _AssignmentInteractionScreenState
                     ),
                     child: Row(
                       children: [
-                        const Icon(Icons.warning_amber_rounded, color: Colors.orange),
+                        const Icon(
+                          Icons.warning_amber_rounded,
+                          color: Colors.orange,
+                        ),
                         const SizedBox(width: 16),
                         const Expanded(
                           child: Text(
@@ -5036,22 +5315,52 @@ class _AssignmentInteractionScreenState
           ),
 
           Container(
-            padding: const EdgeInsets.all(32),
-            child: Stack(
-              alignment: Alignment.center,
+            padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 32),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              border: Border(top: BorderSide(color: Colors.grey.shade200)),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
+                // Info text about auto-submit at the end
                 if (currentMcqIndex == mcqData.length - 1)
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: Text(
-                      'Auto-submitting in $_mcqTimeLeft s...',
-                      style: TextStyle(
-                        color: Colors.grey.shade600,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
+                  Text(
+                    'Auto-submitting in $_mcqTimeLeft s...',
+                    style: TextStyle(
+                      color: Colors.grey.shade600,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                  )
+                else
+                  const SizedBox(),
+
+                // Control Buttons
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Skip Button
+                    OutlinedButton.icon(
+                      onPressed: () {
+                        setState(() {
+                          mcqAnswers.remove(currentMcqIndex);
+                        });
+                        _moveToNextQuestionOrSubmit();
+                      },
+                      icon: const Icon(Icons.keyboard_double_arrow_right, color: Colors.orange),
+                      label: const Text(
+                        'Skip Question',
+                        style: TextStyle(color: Colors.orange, fontWeight: FontWeight.bold),
+                      ),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+                        side: const BorderSide(color: Colors.orange),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                       ),
                     ),
-                  ),
+                  ],
+                ),
               ],
             ),
           ),
@@ -5070,13 +5379,37 @@ class _AssignmentInteractionScreenState
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text(
-          isMcq ? 'Live Results Dashboard' : 'Submissions Review',
-          style: GoogleFonts.outfit(
-            fontSize: 24,
-            fontWeight: FontWeight.bold,
-            color: const Color(0xFF2D3436),
-          ),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              isMcq ? 'Live Results Dashboard' : 'Submissions Review',
+              style: GoogleFonts.outfit(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: const Color(0xFF2D3436),
+              ),
+            ),
+            if (isMcq)
+              ElevatedButton.icon(
+                onPressed: () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Downloading Student MCQ Results as PDF...'),
+                      backgroundColor: Color(0xFF6C5CE7),
+                    ),
+                  );
+                },
+                icon: const Icon(Icons.download_rounded),
+                label: const Text('Download All Details'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF6C5CE7),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+              ),
+          ],
         ),
         const SizedBox(height: 24),
         Row(
@@ -5345,72 +5678,69 @@ class _AssignmentInteractionScreenState
                 ],
               )
             : (hasSubmitted && !isMcq)
-                ? IconButton(
-                    icon: const Icon(Icons.folder_open, color: Colors.blue),
-                    onPressed: () {
-                      List<PlatformFile> files =
-                          AppData().assignmentSubmissions[widget
-                                  .assignment['id']] ??
-                              [];
-                      showDialog(
-                        context: context,
-                        builder: (ctx) => AlertDialog(
-                          title: Text('$name\'s Submission'),
-                          content: SizedBox(
-                            width: 400,
-                            child:
-                                files.isEmpty
-                                    ? const Text('No files submitted manually.')
-                                    : Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children:
-                                          files
-                                              .map(
-                                                (f) => ListTile(
-                                                  leading: const Icon(
-                                                    Icons.file_present,
-                                                  ),
-                                                  title: Text(f.name),
-                                                  trailing: Text(
-                                                    '${(f.size / 1024).toStringAsFixed(1)} KB',
-                                                  ),
-                                                  onTap: () {
-                                                    Navigator.pop(ctx);
-                                                    ScaffoldMessenger.of(context)
-                                                        .showSnackBar(
-                                                          SnackBar(
-                                                            content: Text(
-                                                              'Opening ${f.name}...',
-                                                            ),
-                                                          ),
-                                                        );
-                                                  },
-                                                ),
-                                              )
-                                              .toList(),
-                                    ),
-                          ),
-                          actions: [
-                            TextButton(
-                              onPressed: () => Navigator.pop(ctx),
-                              child: const Text('Close'),
-                            ),
-                          ],
+            ? IconButton(
+                icon: const Icon(Icons.folder_open, color: Colors.blue),
+                onPressed: () {
+                  List<PlatformFile> files =
+                      AppData().assignmentSubmissions[widget
+                          .assignment['id']] ??
+                      [];
+                  showDialog(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      title: Text('$name\'s Submission'),
+                      content: SizedBox(
+                        width: 400,
+                        child: files.isEmpty
+                            ? const Text('No files submitted manually.')
+                            : Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: files
+                                    .map(
+                                      (f) => ListTile(
+                                        leading: const Icon(Icons.file_present),
+                                        title: Text(f.name),
+                                        trailing: Text(
+                                          '${(f.size / 1024).toStringAsFixed(1)} KB',
+                                        ),
+                                        onTap: () {
+                                          Navigator.pop(ctx);
+                                          ScaffoldMessenger.of(
+                                            context,
+                                          ).showSnackBar(
+                                            SnackBar(
+                                              content: Text(
+                                                'Opening ${f.name}...',
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                      ),
+                                    )
+                                    .toList(),
+                              ),
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(ctx),
+                          child: const Text('Close'),
                         ),
-                      );
-                    },
-                  )
-                : Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: Colors.grey.shade100,
+                      ],
                     ),
-                    child: Icon(
-                      hasSubmitted ? Icons.attachment : Icons.close,
-                      color: Colors.grey,
-                    ),
-                  ),
+                  );
+                },
+              )
+            : Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.grey.shade100,
+                ),
+                child: Icon(
+                  hasSubmitted ? Icons.attachment : Icons.close,
+                  color: Colors.grey,
+                ),
+              ),
       ),
     );
   }
