@@ -7,9 +7,36 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:dotted_border/dotted_border.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:camera/camera.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'auth.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // TODO: Replace these with your actual Supabase Project URL and Anon Key
+  try {
+    await Supabase.initialize(
+      url: 'https://wagtgvrfiscusihqgsds.supabase.co',
+      anonKey: 'sb_publishable_5w97jQG482KDYVVGlbALAg_HsZxEgHq',
+    );
+  } catch (e) {
+    debugPrint('Supabase init failed. Please update the URL and Anon Key.');
+  }
   runApp(const PTU_PORTALApp());
+}
+
+final supabase = Supabase.instance.client;
+
+String _formatDateTime12h(DateTime? dt) {
+  if (dt == null) return '--';
+  final hour = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
+  final minute = dt.minute.toString().padLeft(2, '0');
+  final period = dt.hour >= 12 ? 'PM' : 'AM';
+  final day = dt.day.toString().padLeft(2, '0');
+  final month = dt.month.toString().padLeft(2, '0');
+  return '${dt.year}-$month-$day  $hour:$minute $period';
 }
 
 // ---------------------------------------------------------
@@ -29,6 +56,10 @@ class AppData extends ChangeNotifier {
   bool isLoggedIn = false;
   String? loggedEmail;
   String? loggedPhone;
+  String? loggedEnrollNo;
+  String? loggedTeacherId;
+  String? loggedName;
+  bool isRegistrationPending = false;
 
   // Shared state
   List<Map<String, dynamic>> classes = [
@@ -126,9 +157,49 @@ class AppData extends ChangeNotifier {
           a['isDone'] = true;
           a['isMissed'] = isMissed;
           notifyListeners();
+          // Persist to Supabase
+          _upsertAssignmentStatus(
+            assignmentId: assignmentId,
+            isDone: true,
+            isMissed: isMissed,
+            isFlagged: isFlagged,
+            score: score,
+            answers: answers,
+          );
           return;
         }
       }
+    }
+  }
+
+  Future<void> _upsertAssignmentStatus({
+    required String assignmentId,
+    bool isDone = false,
+    bool isMissed = false,
+    bool isFlagged = false,
+    int score = 0,
+    Map<int, int>? answers,
+    int? submissionCount,
+    int? unsubmitCount,
+  }) async {
+    try {
+      final studentId = loggedPhone ?? loggedEmail ?? 'unknown';
+      await supabase.from('assignment_status').upsert({
+        'assignment_id': assignmentId,
+        'student_id': studentId,
+        'is_done': isDone,
+        'is_missed': isMissed,
+        'is_flagged': isFlagged,
+        'mcq_score': score,
+        'mcq_answers':
+            answers != null
+                ? answers.map((k, v) => MapEntry(k.toString(), v))
+                : null,
+        if (submissionCount != null) 'submission_count': submissionCount,
+        if (unsubmitCount != null) 'unsubmit_count': unsubmitCount,
+      }, onConflict: 'assignment_id,student_id');
+    } catch (e) {
+      debugPrint('Supabase upsert status error: $e');
     }
   }
 
@@ -153,33 +224,228 @@ class AppData extends ChangeNotifier {
     notifyListeners();
   }
 
-  bool loginTeacher(String email, String password) {
-    if ((email == 'ptucsc@gmail.com' || email == 'ptubanktech@gmail.com') &&
-        password == 'ptu@123') {
-      isLoggedIn = true;
-      currentUserRole = UserRole.teacher;
-      loggedEmail = email;
-      notifyListeners();
-      return true;
+  Future<bool> loginTeacher(String teacherId, String passwordInput) async {
+    try {
+      // Step 1: Check if registered in teacher_register_details
+      final registeredCheck = await supabase
+          .from('teacher_register_details')
+          .select()
+          .eq('teacher_id', teacherId)
+          .maybeSingle();
+
+      if (registeredCheck != null) {
+        if (registeredCheck['password'] == passwordInput) {
+          isLoggedIn = true;
+          isRegistrationPending = false;
+          currentUserRole = UserRole.teacher;
+          loggedTeacherId = teacherId;
+          loggedName = registeredCheck['name'];
+          loggedEmail = registeredCheck['email'];
+          notifyListeners();
+          loadAssignmentsFromSupabase();
+          return true;
+        } else {
+          debugPrint('Teacher password mismatch');
+          return false;
+        }
+      }
+
+      // Step 2: Check if in teacher_enrollments (initial registration)
+      final preCheck = await supabase
+          .from('teacher_enrollments')
+          .select()
+          .eq('teacher_id', teacherId)
+          .maybeSingle();
+
+      if (preCheck != null) {
+        // Initial password for teachers also ptu@123
+        if (passwordInput == 'ptu@123') {
+          isRegistrationPending = true;
+          currentUserRole = UserRole.teacher;
+          loggedTeacherId = teacherId;
+          loggedName = preCheck['teacher_name'];
+          notifyListeners();
+          return true;
+        } else {
+          debugPrint('Initial teacher password must be ptu@123');
+          return false;
+        }
+      }
+
+      return false;
+    } catch (e) {
+      debugPrint('Teacher login error: $e');
+      return false;
     }
-    return false;
   }
 
-  bool loginStudent(String phone, String password) {
-    if (password == '30082005' || password == '18032005') {
+  Future<String?> registerTeacherDetails({
+    required String teacherId,
+    required String name,
+    required String phone,
+    required String email,
+    required String department,
+    required String designation,
+    required String password,
+  }) async {
+    try {
+      await supabase.from('teacher_register_details').insert({
+        'teacher_id': teacherId,
+        'name': name,
+        'phone': phone,
+        'email': email,
+        'department': department,
+        'designation': designation,
+        'password': password,
+        'is_registered': true,
+      });
+
       isLoggedIn = true;
+      isRegistrationPending = false;
+      currentUserRole = UserRole.teacher;
+      loggedTeacherId = teacherId;
+      loggedName = name;
+      loggedEmail = email;
+      notifyListeners();
+      loadAssignmentsFromSupabase();
+      return null;
+    } on PostgrestException catch (e) {
+      debugPrint('Supabase teacher registration error: ${e.message}');
+      return e.message;
+    } catch (e) {
+      debugPrint('Supabase teacher registration error: $e');
+      return e.toString();
+    }
+  }
+
+  Future<bool> loginStudent(String enrollNo, String passwordInput) async {
+    try {
+      // Step 1: Check if this user is already registered in student_registered_details
+      final registeredCheck =
+          await supabase
+              .from('student_registered_details')
+              .select()
+              .eq('enrollno', enrollNo)
+              .maybeSingle();
+
+      if (registeredCheck != null) {
+        // Already registered: Check if the password they typed matches their saved password
+        if (registeredCheck['password'] == passwordInput) {
+          isLoggedIn = true;
+          isRegistrationPending = false;
+          currentUserRole = UserRole.student;
+          loggedEnrollNo = enrollNo;
+          loggedName = registeredCheck['name'];
+          loggedPhone = registeredCheck['phone'];
+          notifyListeners();
+          loadAssignmentsFromSupabase();
+          return true;
+        } else {
+          debugPrint('Registered student password mismatch');
+          return false;
+        }
+      }
+
+      // Step 2: If not registered, it's their FIRST TIME. Check student_int.
+      final preCheck =
+          await supabase
+              .from('student_int')
+              .select()
+              .eq('Enrollment No', int.tryParse(enrollNo) ?? -1)
+              .maybeSingle();
+
+      if (preCheck != null) {
+        // Initial password for all new students is 'ptu@123'
+        if (passwordInput == 'ptu@123') {
+          // Success: Initial Login successful
+          isRegistrationPending = true;
+          loggedEnrollNo = enrollNo;
+          loggedName = preCheck['name']; // Map to name from student_int
+          notifyListeners();
+          return true;
+        } else {
+          debugPrint('Initial password must be ptu@123');
+          return false;
+        }
+      }
+
+      return false; // Not registered, not in initial list either
+    } catch (e) {
+      debugPrint('Student login error: $e');
+      return false;
+    }
+  }
+
+  Future<String?> registerStudentDetails({
+    required String enrollNo,
+    required String name,
+    required String phone,
+    required String dob,
+    required String department,
+    required String year,
+    required String semester,
+    required String section,
+    required String password,
+  }) async {
+    try {
+      // Postgres expects YYYY-MM-DD, convert if format is DD/MM/YYYY or DD-MM-YYYY
+      String sqlDob = dob;
+      try {
+        if (dob.contains('/')) {
+          final parts = dob.split('/');
+          if (parts.length == 3) {
+            sqlDob =
+                '${parts[2]}-${parts[1].padLeft(2, '0')}-${parts[0].padLeft(2, '0')}';
+          }
+        } else if (dob.contains('-') && dob.split('-')[0].length <= 2) {
+          final parts = dob.split('-');
+          if (parts.length == 3) {
+            sqlDob =
+                '${parts[2]}-${parts[1].padLeft(2, '0')}-${parts[0].padLeft(2, '0')}';
+          }
+        }
+      } catch (_) {}
+
+      await supabase.from('student_registered_details').insert({
+        'Enrollment No': int.tryParse(enrollNo) ?? -1,
+        'enrollno': enrollNo,
+        'name': name,
+        'phone': phone,
+        'dob': sqlDob,
+        'department': department,
+        'year': year,
+        'semester': semester,
+        'section': section,
+        'password': password,
+        'is_registered': true,
+      });
+
+      isLoggedIn = true;
+      isRegistrationPending = false;
       currentUserRole = UserRole.student;
+      loggedEnrollNo = enrollNo;
+      loggedName = name;
       loggedPhone = phone;
       notifyListeners();
-      return true;
+      loadAssignmentsFromSupabase();
+      return null;
+    } on PostgrestException catch (e) {
+      debugPrint('Supabase student registration error: ${e.message}');
+      return e.message;
+    } catch (e) {
+      debugPrint('Supabase student registration error: $e');
+      return e.toString();
     }
-    return false;
   }
 
   void logout() {
     isLoggedIn = false;
+    isRegistrationPending = false;
     loggedEmail = null;
     loggedPhone = null;
+    loggedEnrollNo = null;
+    loggedTeacherId = null;
+    loggedName = null;
     notifyListeners();
   }
 
@@ -188,7 +454,7 @@ class AppData extends ChangeNotifier {
     notifyListeners();
   }
 
-  void addAssignment(
+  Future<void> addAssignment(
     String classId,
     String title,
     String dueDate, {
@@ -199,9 +465,10 @@ class AppData extends ChangeNotifier {
     int timePerQuestion = 30,
     DateTime? startDateTime,
     DateTime? dueDateTime,
-  }) {
-    classAssignments[classId]?.insert(0, {
-      'id': 'a_${DateTime.now().millisecondsSinceEpoch}',
+  }) async {
+    final newId = 'a_${DateTime.now().millisecondsSinceEpoch}';
+    final assignment = {
+      'id': newId,
       'title': title,
       'dueDate': dueDate,
       'dueDateTime': dueDateTime,
@@ -212,11 +479,115 @@ class AppData extends ChangeNotifier {
       'mcqData': mcqData,
       'timePerQuestion': timePerQuestion,
       'isDone': false,
-    });
+    };
+    classAssignments.putIfAbsent(classId, () => []).insert(0, assignment);
     notifyListeners();
+
+    // Persist to Supabase
+    try {
+      String? filePath;
+      try {
+        if (file != null && file.bytes != null) {
+          final path = '$newId/${file.name}';
+          await supabase.storage.from('assignments').uploadBinary(
+            path,
+            file.bytes!,
+          );
+          filePath = file.name;
+        }
+      } catch (e) {
+        debugPrint(
+          'File upload failed (check if "assignments" bucket exists): $e',
+        );
+      }
+
+      await supabase.from('assignments').insert({
+        'id': newId,
+        'class_id': classId,
+        'title': title,
+        'due_date': dueDate,
+        'due_datetime': dueDateTime?.toIso8601String(),
+        'start_datetime': startDateTime?.toIso8601String(),
+        'year': year,
+        'semester': semester,
+        'instructor_file_name': filePath,
+        'mcq_data': mcqData,
+        'time_per_question': timePerQuestion,
+      });
+    } catch (e) {
+      debugPrint('Supabase addAssignment error: $e');
+    }
   }
 
-  void toggleTurnIn(String assignmentId) {
+  // Load assignments from Supabase and merge into local maps
+  Future<void> loadAssignmentsFromSupabase() async {
+    try {
+      final rows = await supabase.from('assignments').select();
+      for (final row in rows) {
+        final classId = row['class_id'] as String?;
+        if (classId == null) continue;
+        classAssignments.putIfAbsent(classId, () => []);
+        // Avoid duplicates
+        final exists = classAssignments[classId]!.any(
+          (a) => a['id'] == row['id'],
+        );
+        if (!exists) {
+          classAssignments[classId]!.insert(0, {
+            'id': row['id'],
+            'title': row['title'],
+            'dueDate': row['due_date'] ?? '',
+            'dueDateTime':
+                row['due_datetime'] != null
+                    ? DateTime.tryParse(row['due_datetime'])
+                    : null,
+            'startDateTime':
+                row['start_datetime'] != null
+                    ? DateTime.tryParse(row['start_datetime'])
+                    : null,
+            'year': row['year'] ?? 'All',
+            'semester': row['semester'] ?? 'All',
+            'instructorFileName': row['instructor_file_name'],
+            'mcqData': row['mcq_data'],
+            'timePerQuestion': row['time_per_question'] ?? 30,
+            'isDone': false,
+          });
+        }
+      }
+
+      // Load student statuses
+      final studentId = loggedPhone ?? loggedEmail;
+      if (studentId != null) {
+        final statuses = await supabase
+            .from('assignment_status')
+            .select()
+            .eq('student_id', studentId);
+        for (final s in statuses) {
+          final aId = s['assignment_id'] as String;
+          if (s['is_done'] == true) {
+            for (var list in classAssignments.values) {
+              for (var a in list) {
+                if (a['id'] == aId) {
+                  a['isDone'] = true;
+                  a['isMissed'] = s['is_missed'] ?? false;
+                }
+              }
+            }
+          }
+          if (s['mcq_score'] != null) mcqScores[aId] = s['mcq_score'];
+          if (s['is_flagged'] == true) mcqFlagged[aId] = true;
+          if (s['submission_count'] != null)
+            assignmentSubmissionCounts[aId] = s['submission_count'];
+          if (s['unsubmit_count'] != null)
+            assignmentUnsubmitCounts[aId] = s['unsubmit_count'];
+        }
+      }
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Supabase loadAssignments error: $e');
+    }
+  }
+
+  Future<void> toggleTurnIn(String assignmentId) async {
     for (var list in classAssignments.values) {
       for (var a in list) {
         if (a['id'] == assignmentId) {
@@ -225,16 +596,37 @@ class AppData extends ChangeNotifier {
             // Trying to Submit
             int submitCount = assignmentSubmissionCounts[assignmentId] ?? 0;
             if (submitCount >= 2) return; // Block further submissions
+
+            // Real Upload to Supabase Storage
+            final studentId = loggedPhone ?? loggedEmail ?? 'unknown';
+            final files = assignmentSubmissions[assignmentId];
+            String? uploadedFileName;
+
+            if (files != null && files.isNotEmpty) {
+              final file = files.first;
+              if (file.bytes != null) {
+                final path = '$assignmentId/$studentId/${file.name}';
+                await supabase.storage.from('submissions').uploadBinary(
+                  path,
+                  file.bytes!,
+                );
+                uploadedFileName = file.name;
+              }
+            }
+
+            // Update Database
+            await supabase.from('assignment_status').upsert({
+              'assignment_id': assignmentId,
+              'student_id': studentId,
+              'is_done': true,
+              'submission_file_name': uploadedFileName,
+              'submission_count': submitCount + 1,
+            });
+
             assignmentSubmissionCounts[assignmentId] = submitCount + 1;
           } else {
-            // Trying to Unsubmit (Undone)
-            int unsubmitCount = assignmentUnsubmitCounts[assignmentId] ?? 0;
-            if (unsubmitCount >= 1)
-              return; // Block if already used the one undo chance
-            assignmentUnsubmitCounts[assignmentId] = unsubmitCount + 1;
-            assignmentSubmissions.remove(
-              assignmentId,
-            ); // Clear old files on undone
+            // Trying to Unsubmit
+            // ... (optional: delete file from storage)
           }
           a['isDone'] = !a['isDone'];
           notifyListeners();
@@ -263,7 +655,7 @@ class AppData extends ChangeNotifier {
     notifyListeners();
   }
 
-  void deleteAssignment(String classId, String assignmentId) {
+  Future<void> deleteAssignment(String classId, String assignmentId) async {
     classAssignments[classId]?.removeWhere((a) => a['id'] == assignmentId);
     // Cleanup other maps
     assignmentSubmissions.remove(assignmentId);
@@ -274,6 +666,12 @@ class AppData extends ChangeNotifier {
     assignmentUnsubmitCounts.remove(assignmentId);
     mcqFlagged.remove(assignmentId);
     notifyListeners();
+    // Delete from Supabase
+    try {
+      await supabase.from('assignments').delete().eq('id', assignmentId);
+    } catch (e) {
+      debugPrint('Supabase deleteAssignment error: $e');
+    }
   }
 }
 
@@ -305,283 +703,13 @@ class PTU_PORTALApp extends StatelessWidget {
           ),
           home: AppData().isLoggedIn
               ? const MainLayoutScreen()
-              : const LoginScreen(),
+              : (AppData().isRegistrationPending
+                    ? (AppData().currentUserRole == UserRole.teacher 
+                        ? const TeacherRegistrationScreen() 
+                        : const StudentRegistrationScreen())
+                    : const LoginScreen()),
         );
       },
-    );
-  }
-}
-
-// ---------------------------------------------------------
-// Login Screen
-// ---------------------------------------------------------
-class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key});
-
-  @override
-  State<LoginScreen> createState() => _LoginScreenState();
-}
-
-class _LoginScreenState extends State<LoginScreen> {
-  final TextEditingController _idController = TextEditingController();
-  final TextEditingController _passController = TextEditingController();
-  UserRole _selectedRole = UserRole.student;
-  bool _isPasswordVisible = false;
-
-  void _handleLogin() {
-    final id = _idController.text.trim();
-    final pass = _passController.text.trim();
-
-    if (id.isEmpty || pass.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter all credentials')),
-      );
-      return;
-    }
-
-    bool success = false;
-    if (_selectedRole == UserRole.teacher) {
-      success = AppData().loginTeacher(id, pass);
-    } else {
-      success = AppData().loginStudent(id, pass);
-    }
-
-    if (success) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const MainLayoutScreen()),
-      );
-    } else {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Invalid credentials')));
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.white,
-      body: Row(
-        children: [
-          // Left Side - Info/Branding
-          Expanded(
-            child: Container(
-              color: const Color(0xFF6C5CE7).withAlpha(10),
-              padding: const EdgeInsets.all(60),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF6C5CE7),
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: const Icon(
-                      Icons.school_rounded,
-                      color: Colors.white,
-                      size: 40,
-                    ),
-                  ),
-                  const SizedBox(height: 32),
-                  Text(
-                    'PTU PORTAL',
-                    style: GoogleFonts.plusJakartaSans(
-                      fontSize: 40,
-                      fontWeight: FontWeight.w800,
-                      color: const Color(0xFF2D3436),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    'The ultimate academic management system for modern education.',
-                    style: TextStyle(
-                      fontSize: 18,
-                      color: Colors.grey.shade600,
-                      height: 1.5,
-                    ),
-                  ),
-                  const SizedBox(height: 48),
-                  _buildBullet('Role-based access control'),
-                  _buildBullet('Real-time assignment tracking'),
-                  _buildBullet('Instant MCQ results & analytics'),
-                ],
-              ),
-            ),
-          ),
-          // Right Side - Login Form
-          Container(
-            width: 500,
-            padding: const EdgeInsets.all(60),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Text(
-                  'Welcome Back',
-                  style: GoogleFonts.plusJakartaSans(
-                    fontSize: 32,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  'Please enter your details to sign in.',
-                  style: TextStyle(color: Colors.grey.shade500),
-                ),
-                const SizedBox(height: 40),
-                // Role Toggle
-                Container(
-                  padding: const EdgeInsets.all(4),
-                  decoration: BoxDecoration(
-                    color: Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Row(
-                    children: [
-                      _buildRoleTab('Student', UserRole.student),
-                      _buildRoleTab('Teacher', UserRole.teacher),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 32),
-                // Input Fields
-                _buildLabel(
-                  _selectedRole == UserRole.teacher
-                      ? 'Email Address'
-                      : 'Phone Number',
-                ),
-                TextField(
-                  controller: _idController,
-                  decoration: InputDecoration(
-                    hintText: _selectedRole == UserRole.teacher
-                        ? 'ptucsc@gmail.com'
-                        : 'Enter phone number',
-                    prefixIcon: Icon(
-                      _selectedRole == UserRole.teacher
-                          ? Icons.alternate_email
-                          : Icons.phone,
-                    ),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 24),
-                _buildLabel('Password'),
-                TextField(
-                  controller: _passController,
-                  obscureText: !_isPasswordVisible,
-                  decoration: InputDecoration(
-                    hintText: '••••••••',
-                    prefixIcon: const Icon(Icons.lock_outline),
-                    suffixIcon: IconButton(
-                      icon: Icon(
-                        _isPasswordVisible
-                            ? Icons.visibility
-                            : Icons.visibility_off,
-                      ),
-                      onPressed: () => setState(
-                        () => _isPasswordVisible = !_isPasswordVisible,
-                      ),
-                    ),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: TextButton(
-                    onPressed: () {},
-                    child: const Text('Forgot Password?'),
-                  ),
-                ),
-                const SizedBox(height: 32),
-                ElevatedButton(
-                  onPressed: _handleLogin,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF6C5CE7),
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 20),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                  child: const Text(
-                    'Sign In',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildRoleTab(String label, UserRole role) {
-    bool isSelected = _selectedRole == role;
-    return Expanded(
-      child: GestureDetector(
-        onTap: () => setState(() => _selectedRole = role),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          decoration: BoxDecoration(
-            color: isSelected ? Colors.white : Colors.transparent,
-            borderRadius: BorderRadius.circular(8),
-            boxShadow: isSelected
-                ? [
-                    BoxShadow(
-                      color: Colors.black.withAlpha(5),
-                      blurRadius: 4,
-                      offset: const Offset(0, 2),
-                    ),
-                  ]
-                : null,
-          ),
-          child: Text(
-            label,
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-              color: isSelected
-                  ? const Color(0xFF6C5CE7)
-                  : Colors.grey.shade600,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildLabel(String text) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8.0, left: 4),
-      child: Text(
-        text,
-        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
-      ),
-    );
-  }
-
-  Widget _buildBullet(String text) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Row(
-        children: [
-          const Icon(Icons.check_circle, color: Color(0xFF6C5CE7), size: 20),
-          const SizedBox(width: 12),
-          Text(
-            text,
-            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
-          ),
-        ],
-      ),
     );
   }
 }
@@ -803,23 +931,26 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
 
   Widget _buildUserInfo() {
     UserRole role = AppData().currentUserRole;
-    String name = role == UserRole.teacher
-        ? (AppData().loggedEmail ?? 'Teacher')
-        : (AppData().loggedPhone ?? 'Student');
+    String name =
+        role == UserRole.teacher
+            ? (AppData().loggedEmail ?? 'Teacher')
+            : (AppData().loggedName ?? AppData().loggedPhone ?? 'Student');
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24.0),
       child: Row(
         children: [
           CircleAvatar(
             radius: 20,
-            backgroundColor: role == UserRole.teacher
-                ? Colors.amber.shade100
-                : Colors.blue.shade100,
+            backgroundColor:
+                role == UserRole.teacher
+                    ? Colors.amber.shade100
+                    : Colors.blue.shade100,
             child: Icon(
               role == UserRole.teacher ? Icons.person_4 : Icons.face,
-              color: role == UserRole.teacher
-                  ? Colors.amber.shade800
-                  : Colors.blue.shade800,
+              color:
+                  role == UserRole.teacher
+                      ? Colors.amber.shade800
+                      : Colors.blue.shade800,
             ),
           ),
           const SizedBox(width: 12),
@@ -856,9 +987,10 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
       child: ListTile(
         onTap: () => setState(() => _currentPage = page),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        tileColor: isSelected
-            ? const Color(0xFF6C5CE7).withAlpha(20)
-            : Colors.transparent,
+        tileColor:
+            isSelected
+                ? const Color(0xFF6C5CE7).withAlpha(20)
+                : Colors.transparent,
         leading: Icon(
           icon,
           color: isSelected ? const Color(0xFF6C5CE7) : Colors.grey.shade500,
@@ -899,6 +1031,7 @@ class McqCentralView extends StatefulWidget {
 }
 
 class _McqCentralViewState extends State<McqCentralView> {
+
   @override
   Widget build(BuildContext context) {
     bool isTeacher = AppData().currentUserRole == UserRole.teacher;
@@ -931,137 +1064,132 @@ class _McqCentralViewState extends State<McqCentralView> {
                   ),
                 ),
                 if (isTeacher)
-                  ElevatedButton.icon(
-                    onPressed: () => _openCreateMcqTestDialog(context),
-                    icon: const Icon(Icons.add),
-                    label: const Text('Upload New MCQ JSON Test'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF6C5CE7),
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 24,
-                        vertical: 16,
-                      ),
-                    ),
+                  const Text(
+                    'Review and grade tests below',
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
                   ),
               ],
             ),
             const SizedBox(height: 32),
             Expanded(
-              child: allMcqTests.isEmpty
-                  ? const Center(
-                      child: Text(
-                        'No MCQ Tests available.',
-                        style: TextStyle(color: Colors.grey, fontSize: 16),
-                      ),
-                    )
-                  : ListView.builder(
-                      itemCount: allMcqTests.length,
-                      itemBuilder: (ctx, i) {
-                        var item = allMcqTests[i];
-                        var cls = item['classData'];
-                        var a = item['assignment'];
+              child:
+                  allMcqTests.isEmpty
+                      ? const Center(
+                        child: Text(
+                          'No MCQ Tests available.',
+                          style: TextStyle(color: Colors.grey, fontSize: 16),
+                        ),
+                      )
+                      : ListView.builder(
+                        itemCount: allMcqTests.length,
+                        itemBuilder: (ctx, i) {
+                          var item = allMcqTests[i];
+                          var cls = item['classData'];
+                          var a = item['assignment'];
 
-                        return Card(
-                          margin: const EdgeInsets.only(bottom: 16),
-                          elevation: 0,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16),
-                            side: BorderSide(color: Colors.grey.shade200),
-                          ),
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(16),
-                            onTap: () {
-                              Navigator.push(
-                                context,
-                                MaterialPageRoute(
-                                  builder: (_) => AssignmentInteractionScreen(
-                                    assignment: a,
-                                    classColor: cls['color'],
+                          return Card(
+                            margin: const EdgeInsets.only(bottom: 16),
+                            elevation: 0,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(16),
+                              side: BorderSide(color: Colors.grey.shade200),
+                            ),
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(16),
+                              onTap: () {
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder:
+                                        (_) => AssignmentInteractionScreen(
+                                          assignment: a,
+                                          classColor: cls['color'],
+                                        ),
                                   ),
-                                ),
-                              );
-                            },
-                            child: Padding(
-                              padding: const EdgeInsets.all(24.0),
-                              child: Row(
-                                children: [
-                                  CircleAvatar(
-                                    radius: 24,
-                                    backgroundColor: cls['color'].withAlpha(20),
-                                    child: Icon(
-                                      Icons.quiz,
-                                      color: cls['color'],
+                                );
+                              },
+                              child: Padding(
+                                padding: const EdgeInsets.all(24.0),
+                                child: Row(
+                                  children: [
+                                    CircleAvatar(
+                                      radius: 24,
+                                      backgroundColor: cls['color'].withAlpha(
+                                        20,
+                                      ),
+                                      child: Icon(
+                                        Icons.quiz,
+                                        color: cls['color'],
+                                      ),
                                     ),
-                                  ),
-                                  const SizedBox(width: 24),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          a['title'],
-                                          style: const TextStyle(
-                                            fontSize: 18,
-                                            fontWeight: FontWeight.bold,
+                                    const SizedBox(width: 24),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            a['title'],
+                                            style: const TextStyle(
+                                              fontSize: 18,
+                                              fontWeight: FontWeight.bold,
+                                            ),
                                           ),
-                                        ),
-                                        const SizedBox(height: 4),
-                                        Text(
-                                          '${cls['title']}\nStart: ${a['startDateTime']?.toString().substring(0, 16) ?? 'N/A'}  •  End: ${a['dueDateTime']?.toString().substring(0, 16) ?? a['dueDate']}  •  ${a['mcqData'].length} Questions',
-                                          style: TextStyle(
-                                            color: Colors.grey.shade600,
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            '${cls['title']}\nStart: ${a['startDateTime']?.toString().substring(0, 16) ?? 'N/A'}  •  End: ${a['dueDateTime']?.toString().substring(0, 16) ?? a['dueDate']}  •  ${a['mcqData'].length} Questions',
+                                            style: TextStyle(
+                                              color: Colors.grey.shade600,
+                                            ),
                                           ),
-                                        ),
-                                      ],
+                                        ],
+                                      ),
                                     ),
-                                  ),
-                                  if (isTeacher)
-                                    Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        const Text(
-                                          '0/25 Submitted',
-                                          style: TextStyle(
-                                            color: Color(0xFF6C5CE7),
-                                            fontWeight: FontWeight.w600,
+                                    if (isTeacher)
+                                      Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          const Text(
+                                            '0/25 Submitted',
+                                            style: TextStyle(
+                                              color: Color(0xFF6C5CE7),
+                                              fontWeight: FontWeight.w600,
+                                            ),
                                           ),
-                                        ),
-                                        const SizedBox(width: 12),
-                                        IconButton(
-                                          icon: const Icon(
-                                            Icons.delete_outline,
-                                            color: Colors.red,
+                                          const SizedBox(width: 12),
+                                          IconButton(
+                                            icon: const Icon(
+                                              Icons.delete_outline,
+                                              color: Colors.red,
+                                            ),
+                                            tooltip: 'Delete Test',
+                                            onPressed: () {
+                                              _showDeleteConfirmation(
+                                                context,
+                                                cls['id'],
+                                                a['id'],
+                                              );
+                                            },
                                           ),
-                                          tooltip: 'Delete Test',
-                                          onPressed: () {
-                                            _showDeleteConfirmation(
-                                              context,
-                                              cls['id'],
-                                              a['id'],
-                                            );
-                                          },
-                                        ),
-                                      ],
-                                    )
-                                  else
-                                    a['isDone']
-                                        ? const Icon(
+                                        ],
+                                      )
+                                    else
+                                      a['isDone']
+                                          ? const Icon(
                                             Icons.check_circle,
                                             color: Colors.green,
                                           )
-                                        : const Icon(
+                                          : const Icon(
                                             Icons.pending_actions,
                                             color: Colors.orange,
                                           ),
-                                ],
+                                  ],
+                                ),
                               ),
                             ),
-                          ),
-                        );
-                      },
-                    ),
+                          );
+                        },
+                      ),
             ),
           ],
         ),
@@ -1076,261 +1204,251 @@ class _McqCentralViewState extends State<McqCentralView> {
   ) {
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Confirm Delete'),
-        content: const Text(
-          'Are you sure you want to delete this test? This action cannot be undone.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
+      builder:
+          (ctx) => AlertDialog(
+            title: const Text('Confirm Delete'),
+            content: const Text(
+              'Are you sure you want to delete this test? This action cannot be undone.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () {
+                  AppData().deleteAssignment(classId, assignmentId);
+                  Navigator.pop(ctx);
+                  setState(() {});
+                },
+                style: TextButton.styleFrom(foregroundColor: Colors.red),
+                child: const Text('Delete'),
+              ),
+            ],
           ),
-          TextButton(
-            onPressed: () {
-              AppData().deleteAssignment(classId, assignmentId);
-              Navigator.pop(ctx);
-              setState(() {});
-            },
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
     );
   }
 
-  void _openCreateMcqTestDialog(BuildContext context) {
-    TextEditingController titleCtrl = TextEditingController();
-    TextEditingController timeCtrl = TextEditingController(text: '30');
-    DateTime startDateTime = DateTime.now();
-    DateTime endDateTime = DateTime.now().add(const Duration(minutes: 30));
-    String? selectedClassId = AppData().filteredClasses.first['id'];
-    List<dynamic>? mcqData;
+  }
 
-    showDialog(
-      context: context,
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (ctx, setDialogState) {
-            int qCount = mcqData?.length ?? 0;
-            int timePerQ = int.tryParse(timeCtrl.text) ?? 30;
-            int totalSeconds = qCount * timePerQ;
-            String totalTimeStr =
-                '${totalSeconds ~/ 60}m ${totalSeconds % 60}s';
+void _openCreateMcqTestDialog(BuildContext context, String classId, {VoidCallback? onRefresh}) {
+  TextEditingController titleCtrl = TextEditingController();
+  TextEditingController timeCtrl = TextEditingController(text: '30');
+  DateTime startDateTime = DateTime.now();
+  DateTime endDateTime = DateTime.now().add(const Duration(minutes: 30));
+  List<dynamic>? mcqData;
 
-            return AlertDialog(
-              title: const Text('Upload MCQ JSON Test'),
-              content: SizedBox(
-                width: 400,
-                child: SingleChildScrollView(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      DropdownButtonFormField<String>(
-                        value: selectedClassId,
-                        items: AppData().filteredClasses
-                            .map(
-                              (c) => DropdownMenuItem<String>(
-                                value: c['id'],
-                                child: Text(c['title']),
-                              ),
-                            )
-                            .toList(),
-                        onChanged: (val) =>
-                            setDialogState(() => selectedClassId = val),
-                        decoration: const InputDecoration(
-                          labelText: 'Select Course',
-                          border: OutlineInputBorder(),
+  showDialog(
+    context: context,
+    builder: (ctx) {
+      return StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          int qCount = mcqData?.length ?? 0;
+          int timePerQ = int.tryParse(timeCtrl.text) ?? 30;
+          int totalSeconds = qCount * timePerQ;
+          String totalTimeStr =
+              '${totalSeconds ~/ 60}m ${totalSeconds % 60}s';
+
+          return AlertDialog(
+            title: const Text('Upload MCQ JSON Test'),
+            content: SizedBox(
+              width: 400,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Text(
+                        'Creating Test for: ${AppData().classes.firstWhere((c) => c['id'] == classId)['title']}',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xFF6C5CE7),
                         ),
                       ),
-                      const SizedBox(height: 16),
-                      TextField(
-                        controller: titleCtrl,
-                        decoration: const InputDecoration(
-                          labelText: 'MCQ Test Title',
-                          border: OutlineInputBorder(),
-                        ),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: titleCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'MCQ Test Title',
+                        border: OutlineInputBorder(),
                       ),
-                      const SizedBox(height: 16),
-                      ListTile(
-                        shape: RoundedRectangleBorder(
-                          side: BorderSide(color: Colors.grey.shade400),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        title: Text(
-                          'Start: ${startDateTime.toString().substring(0, 16)}',
-                        ),
-                        trailing: const Icon(Icons.calendar_month),
-                        onTap: () async {
-                          DateTime? date = await showDatePicker(
+                    ),
+                    const SizedBox(height: 16),
+                    ListTile(
+                      shape: RoundedRectangleBorder(
+                        side: BorderSide(color: Colors.grey.shade400),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      title: Text(
+                        'Start: ${startDateTime.toString().substring(0, 16)}',
+                      ),
+                      trailing: const Icon(Icons.calendar_month),
+                      onTap: () async {
+                        DateTime? date = await showDatePicker(
+                          context: ctx,
+                          initialDate: startDateTime,
+                          firstDate: DateTime.now(),
+                          lastDate: DateTime(2030),
+                        );
+                        if (date != null) {
+                          TimeOfDay? time = await showTimePicker(
                             context: ctx,
-                            initialDate: startDateTime,
-                            firstDate: DateTime.now(),
-                            lastDate: DateTime(2030),
+                            initialTime: TimeOfDay.fromDateTime(
+                              startDateTime,
+                            ),
                           );
-                          if (date != null) {
-                            TimeOfDay? time = await showTimePicker(
-                              context: ctx,
-                              initialTime: TimeOfDay.fromDateTime(
-                                startDateTime,
-                              ),
-                            );
-                            if (time != null) {
-                              setDialogState(() {
-                                startDateTime = DateTime(
-                                  date.year,
-                                  date.month,
-                                  date.day,
-                                  time.hour,
-                                  time.minute,
-                                );
-                              });
-                            }
-                          }
-                        },
-                      ),
-                      const SizedBox(height: 16),
-                      ListTile(
-                        shape: RoundedRectangleBorder(
-                          side: BorderSide(color: Colors.grey.shade400),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        title: Text(
-                          'End: ${endDateTime.toString().substring(0, 16)}',
-                        ),
-                        trailing: const Icon(Icons.calendar_month),
-                        onTap: () async {
-                          DateTime? date = await showDatePicker(
-                            context: ctx,
-                            initialDate: endDateTime,
-                            firstDate: startDateTime,
-                            lastDate: DateTime(2030),
-                          );
-                          if (date != null) {
-                            TimeOfDay? time = await showTimePicker(
-                              context: ctx,
-                              initialTime: TimeOfDay.fromDateTime(endDateTime),
-                            );
-                            if (time != null) {
-                              setDialogState(() {
-                                endDateTime = DateTime(
-                                  date.year,
-                                  date.month,
-                                  date.day,
-                                  time.hour,
-                                  time.minute,
-                                );
-                              });
-                            }
-                          }
-                        },
-                      ),
-                      const SizedBox(height: 16),
-                      TextField(
-                        controller: timeCtrl,
-                        decoration: InputDecoration(
-                          labelText: 'Time per question (seconds)',
-                          border: const OutlineInputBorder(),
-                          helperText: 'Total Test Time: $totalTimeStr',
-                        ),
-                        keyboardType: TextInputType.number,
-                        onChanged: (val) => setDialogState(() {}),
-                      ),
-                      const SizedBox(height: 16),
-                      OutlinedButton.icon(
-                        onPressed: () async {
-                          var res = await FilePicker.platform.pickFiles(
-                            type: FileType.custom,
-                            allowedExtensions: ['json'],
-                            withData: true,
-                          );
-                          if (res != null && res.files.first.bytes != null) {
-                            try {
-                              final data = jsonDecode(
-                                utf8.decode(res.files.first.bytes!),
+                          if (time != null) {
+                            setDialogState(() {
+                              startDateTime = DateTime(
+                                date.year,
+                                date.month,
+                                date.day,
+                                time.hour,
+                                time.minute,
                               );
-                              if (data is List) {
-                                setDialogState(() => mcqData = data);
-                              }
-                            } catch (e) {
-                              debugPrint('Error parsing MCQ JSON: $e');
-                            }
+                            });
                           }
-                        },
-                        icon: const Icon(Icons.file_upload),
-                        label: Text(
-                          mcqData != null
-                              ? 'MCQ Test Attached (${mcqData!.length} Qs)'
-                              : 'Upload JSON File',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    ListTile(
+                      shape: RoundedRectangleBorder(
+                        side: BorderSide(color: Colors.grey.shade400),
+                        borderRadius: BorderRadius.circular(4),
                       ),
-                      const SizedBox(height: 12),
-                      Text(
-                        'Note: JSON file should be an array of questions with 4 options each and an answerIndex.',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Colors.grey.shade600,
-                        ),
+                      title: Text('End: ${endDateTime.toString().substring(0, 16)}'),
+                      trailing: const Icon(Icons.calendar_month),
+                      onTap: () async {
+                        DateTime? date = await showDatePicker(
+                          context: ctx,
+                          initialDate: endDateTime,
+                          firstDate: startDateTime,
+                          lastDate: DateTime(2030),
+                        );
+                        if (date != null) {
+                          TimeOfDay? time = await showTimePicker(
+                            context: ctx,
+                            initialTime: TimeOfDay.fromDateTime(endDateTime),
+                          );
+                          if (time != null) {
+                            setDialogState(() {
+                              endDateTime = DateTime(
+                                date.year,
+                                date.month,
+                                date.day,
+                                time.hour,
+                                time.minute,
+                              );
+                            });
+                          }
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: timeCtrl,
+                      decoration: InputDecoration(
+                        labelText: 'Time per question (seconds)',
+                        border: const OutlineInputBorder(),
+                        helperText: 'Total Test Time: $totalTimeStr',
                       ),
-                    ],
-                  ),
+                      keyboardType: TextInputType.number,
+                      onChanged: (val) => setDialogState(() {}),
+                    ),
+                    const SizedBox(height: 16),
+                    OutlinedButton.icon(
+                      onPressed: () async {
+                        var res = await FilePicker.platform.pickFiles(
+                          type: FileType.custom,
+                          allowedExtensions: ['json'],
+                          withData: true,
+                        );
+                        if (res != null && res.files.first.bytes != null) {
+                          try {
+                            final data = jsonDecode(
+                              utf8.decode(res.files.first.bytes!),
+                            );
+                            if (data is List) {
+                              setDialogState(() => mcqData = data);
+                            }
+                          } catch (e) {
+                            debugPrint('Error parsing MCQ JSON: $e');
+                          }
+                        }
+                      },
+                      icon: const Icon(Icons.file_upload),
+                      label: Text(
+                        mcqData != null
+                            ? 'MCQ Test Attached (${mcqData!.length} Qs)'
+                            : 'Upload JSON File',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Note: JSON file should be an array of questions with 4 options each and an answerIndex.',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey.shade600,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('Cancel'),
-                ),
-                ElevatedButton(
-                  onPressed: () {
-                    if (titleCtrl.text.isNotEmpty &&
-                        selectedClassId != null &&
-                        mcqData != null) {
-                      int qCount = mcqData?.length ?? 0;
-                      int timePerQ = int.tryParse(timeCtrl.text) ?? 30;
-                      int totalSeconds = qCount * timePerQ;
-                      if (endDateTime.difference(startDateTime).inSeconds <
-                          totalSeconds) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              'Warning: The time window between Start and End (${endDateTime.difference(startDateTime).inSeconds}s) is smaller than the required total test time (${totalSeconds}s). Please adjust.',
-                            ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  if (titleCtrl.text.isNotEmpty &&
+                      mcqData != null) {
+                    int qCount = mcqData?.length ?? 0;
+                    int timePerQ = int.tryParse(timeCtrl.text) ?? 30;
+                    int totalSeconds = qCount * timePerQ;
+                    if (endDateTime.difference(startDateTime).inSeconds <
+                        totalSeconds) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            'Warning: The time window between Start and End (${endDateTime.difference(startDateTime).inSeconds}s) is smaller than the required total test time (${totalSeconds}s). Please adjust.',
                           ),
-                        );
-                        return;
-                      }
-                      AppData().addAssignment(
-                        selectedClassId!,
-                        titleCtrl.text,
-                        endDateTime.toString().substring(0, 16),
-                        mcqData: mcqData,
-                        timePerQuestion: timePerQ,
-                        startDateTime: startDateTime,
-                        dueDateTime: endDateTime,
+                        ),
                       );
-                      Navigator.pop(ctx);
-                      setState(() {}); // refresh global list
+                      return;
                     }
-                  },
-
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF6C5CE7),
-                    foregroundColor: Colors.white,
-                  ),
-                  child: const Text('Create Test'),
+                    AppData().addAssignment(
+                      classId,
+                      titleCtrl.text,
+                      endDateTime.toString().substring(0, 16),
+                      mcqData: mcqData,
+                      timePerQuestion: timePerQ,
+                      startDateTime: startDateTime,
+                      dueDateTime: endDateTime,
+                    );
+                    Navigator.pop(ctx);
+                    if (onRefresh != null) onRefresh();
+                  }
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF6C5CE7),
+                  foregroundColor: Colors.white,
                 ),
-              ],
-            );
-          },
-        );
-      },
-    );
-  }
+                child: const Text('Create Test'),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+}
 }
 
 // ---------------------------------------------------------
@@ -1519,6 +1637,35 @@ class DashboardView extends StatelessWidget {
                                       fontSize: 13,
                                     ),
                                   ),
+                                  if (AppData().currentUserRole == UserRole.teacher) ...[
+                                    IconButton(
+                                      icon: const Icon(
+                                        Icons.add_task,
+                                        color: Colors.orange,
+                                        size: 20,
+                                      ),
+                                      tooltip: 'Add Assignment',
+                                      onPressed:
+                                          () => _openCreateAssignmentDialog(
+                                            context,
+                                            c['id'],
+                                          ),
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(
+                                        Icons.quiz_outlined,
+                                        color: Color(0xFF6C5CE7),
+                                        size: 20,
+                                      ),
+                                      tooltip: 'Add MCQ Test',
+                                      onPressed:
+                                          () => _openCreateMcqTestDialog(
+                                            context,
+                                            c['id'],
+                                            onRefresh: () => setState(() {}),
+                                          ),
+                                    ),
+                                  ],
                                   IconButton(
                                     icon: const Icon(
                                       Icons.more_horiz,
@@ -1780,9 +1927,8 @@ class DashboardView extends StatelessWidget {
           height: 150 * fillPercent,
           width: 36,
           decoration: BoxDecoration(
-            color: isHighlighted
-                ? const Color(0xFF6C5CE7)
-                : Colors.grey.shade200,
+            color:
+                isHighlighted ? const Color(0xFF6C5CE7) : Colors.grey.shade200,
             borderRadius: BorderRadius.circular(8),
           ),
         ),
@@ -2089,17 +2235,18 @@ class _LiveClassViewState extends State<LiveClassView> {
                       ],
                     ),
                     clipBehavior: Clip.antiAlias,
-                    child: isCameraInitialized && !isVideoOff
-                        ? AspectRatio(
-                            aspectRatio: _cameraController!.value.aspectRatio,
-                            child: CameraPreview(_cameraController!),
-                          )
-                        : const Center(
-                            child: Text(
-                              "Camera is starting...",
-                              style: TextStyle(color: Colors.white),
+                    child:
+                        isCameraInitialized && !isVideoOff
+                            ? AspectRatio(
+                              aspectRatio: _cameraController!.value.aspectRatio,
+                              child: CameraPreview(_cameraController!),
+                            )
+                            : const Center(
+                              child: Text(
+                                "Camera is starting...",
+                                style: TextStyle(color: Colors.white),
+                              ),
                             ),
-                          ),
                   ),
                   const SizedBox(height: 32),
                   Row(
@@ -2346,69 +2493,70 @@ class _LiveClassViewState extends State<LiveClassView> {
                         AppData().setMeetingCode(newCode);
                         showDialog(
                           context: context,
-                          builder: (ctx) => AlertDialog(
-                            title: const Text("Here's your meeting link"),
-                            content: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  "Copy this link and send it to people you want to meet with. Be sure to save it so you can use it later, too.",
-                                ),
-                                const SizedBox(height: 16),
-                                Container(
-                                  decoration: BoxDecoration(
-                                    color: Colors.grey.shade100,
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                  child: ListTile(
-                                    title: Text(
-                                      newCode,
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                        letterSpacing: 1.2,
-                                      ),
+                          builder:
+                              (ctx) => AlertDialog(
+                                title: const Text("Here's your meeting link"),
+                                content: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text(
+                                      "Copy this link and send it to people you want to meet with. Be sure to save it so you can use it later, too.",
                                     ),
-                                    trailing: IconButton(
-                                      icon: const Icon(
-                                        Icons.copy,
-                                        color: Colors.grey,
+                                    const SizedBox(height: 16),
+                                    Container(
+                                      decoration: BoxDecoration(
+                                        color: Colors.grey.shade100,
+                                        borderRadius: BorderRadius.circular(8),
                                       ),
-                                      onPressed: () {
-                                        Clipboard.setData(
-                                          ClipboardData(text: newCode),
-                                        );
-                                        ScaffoldMessenger.of(
-                                          context,
-                                        ).showSnackBar(
-                                          const SnackBar(
-                                            content: Text(
-                                              'Meeting code copied!',
-                                            ),
+                                      child: ListTile(
+                                        title: Text(
+                                          newCode,
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            letterSpacing: 1.2,
                                           ),
-                                        );
-                                      },
+                                        ),
+                                        trailing: IconButton(
+                                          icon: const Icon(
+                                            Icons.copy,
+                                            color: Colors.grey,
+                                          ),
+                                          onPressed: () {
+                                            Clipboard.setData(
+                                              ClipboardData(text: newCode),
+                                            );
+                                            ScaffoldMessenger.of(
+                                              context,
+                                            ).showSnackBar(
+                                              const SnackBar(
+                                                content: Text(
+                                                  'Meeting code copied!',
+                                                ),
+                                              ),
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () {
+                                      Navigator.pop(ctx);
+                                      setState(() => isCodeVerified = true);
+                                    },
+                                    child: const Text(
+                                      'Join Now',
+                                      style: TextStyle(
+                                        color: Color(0xFF6C5CE7),
+                                        fontWeight: FontWeight.bold,
+                                      ),
                                     ),
                                   ),
-                                ),
-                              ],
-                            ),
-                            actions: [
-                              TextButton(
-                                onPressed: () {
-                                  Navigator.pop(ctx);
-                                  setState(() => isCodeVerified = true);
-                                },
-                                child: const Text(
-                                  'Join Now',
-                                  style: TextStyle(
-                                    color: Color(0xFF6C5CE7),
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
+                                ],
                               ),
-                            ],
-                          ),
                         );
                       },
                       icon: const Icon(Icons.video_call),
@@ -2454,8 +2602,9 @@ class _LiveClassViewState extends State<LiveClassView> {
                               Expanded(
                                 child: TextField(
                                   controller: joinCodeCtrl,
-                                  onChanged: (val) =>
-                                      setState(() => joinErrorMsg = null),
+                                  onChanged:
+                                      (val) =>
+                                          setState(() => joinErrorMsg = null),
                                   decoration: const InputDecoration(
                                     hintText: 'Enter a code or link',
                                     border: InputBorder.none,
@@ -2473,17 +2622,19 @@ class _LiveClassViewState extends State<LiveClassView> {
                               setState(() => isCodeVerified = true);
                             } else {
                               setState(
-                                () => joinErrorMsg =
-                                    'Invalid code. Wait for teacher to create a meeting.',
+                                () =>
+                                    joinErrorMsg =
+                                        'Invalid code. Wait for teacher to create a meeting.',
                               );
                             }
                           },
                           child: Text(
                             'Join',
                             style: TextStyle(
-                              color: joinCodeCtrl.text.isEmpty
-                                  ? Colors.grey
-                                  : const Color(0xFF6C5CE7),
+                              color:
+                                  joinCodeCtrl.text.isEmpty
+                                      ? Colors.grey
+                                      : const Color(0xFF6C5CE7),
                               fontWeight: FontWeight.w600,
                               fontSize: 16,
                             ),
@@ -2668,12 +2819,13 @@ class _LiveClassViewState extends State<LiveClassView> {
                           IconButton(
                             icon: Icon(
                               Icons.chat_bubble_outline,
-                              color: isChatOpen
-                                  ? const Color(0xFF8AB4F8)
-                                  : Colors.white,
+                              color:
+                                  isChatOpen
+                                      ? const Color(0xFF8AB4F8)
+                                      : Colors.white,
                             ),
-                            onPressed: () =>
-                                setState(() => isChatOpen = !isChatOpen),
+                            onPressed:
+                                () => setState(() => isChatOpen = !isChatOpen),
                           ),
                         ],
                       ),
@@ -2881,18 +3033,9 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                   ),
                 ),
                 if (isTeacher)
-                  ElevatedButton.icon(
-                    onPressed: () => _openCreateAssignmentDialog(context),
-                    icon: const Icon(Icons.add),
-                    label: const Text('Create Global Assignment'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF6C5CE7),
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 24,
-                        vertical: 16,
-                      ),
-                    ),
+                  const Text(
+                    'Review and grade assignments below',
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
                   ),
               ],
             ),
@@ -2918,10 +3061,11 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                         Navigator.push(
                           context,
                           MaterialPageRoute(
-                            builder: (_) => AssignmentInteractionScreen(
-                              assignment: a,
-                              classColor: cls['color'],
-                            ),
+                            builder:
+                                (_) => AssignmentInteractionScreen(
+                                  assignment: a,
+                                  classColor: cls['color'],
+                                ),
                           ),
                         );
                       },
@@ -3014,13 +3158,13 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                             else
                               a['isDone']
                                   ? const Icon(
-                                      Icons.check_circle,
-                                      color: Colors.green,
-                                    )
+                                    Icons.check_circle,
+                                    color: Colors.green,
+                                  )
                                   : const Icon(
-                                      Icons.pending_actions,
-                                      color: Colors.orange,
-                                    ),
+                                    Icons.pending_actions,
+                                    color: Colors.orange,
+                                  ),
                           ],
                         ),
                       ),
@@ -3042,272 +3186,268 @@ class _AssignmentsViewState extends State<AssignmentsView> {
   ) {
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Confirm Delete'),
-        content: const Text(
-          'Are you sure you want to delete this assignment? This action cannot be undone.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
+      builder:
+          (ctx) => AlertDialog(
+            title: const Text('Confirm Delete'),
+            content: const Text(
+              'Are you sure you want to delete this assignment? This action cannot be undone.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () {
+                  AppData().deleteAssignment(classId, assignmentId);
+                  Navigator.pop(ctx);
+                  setState(() {});
+                },
+                style: TextButton.styleFrom(foregroundColor: Colors.red),
+                child: const Text('Delete'),
+              ),
+            ],
           ),
-          TextButton(
-            onPressed: () {
-              AppData().deleteAssignment(classId, assignmentId);
-              Navigator.pop(ctx);
-              setState(() {});
-            },
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
     );
   }
 
-  void _openCreateAssignmentDialog(BuildContext context) {
-    TextEditingController titleCtrl = TextEditingController();
-    DateTime startDateTime = DateTime.now();
-    DateTime endDateTime = DateTime.now().add(const Duration(days: 7));
-    String? selectedClassId = AppData().filteredClasses.first['id'];
-    String selectedYear = '1st Year';
-    String selectedSem = 'Sem 1';
-    PlatformFile? pickedFile;
-    List<dynamic>? mcqData;
+  }
 
-    showDialog(
-      context: context,
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (ctx, setDialogState) {
-            return AlertDialog(
-              title: const Text('Create New Assignment'),
-              content: SizedBox(
-                width: 400,
-                child: SingleChildScrollView(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: DropdownButtonFormField<String>(
-                              value: selectedYear,
-                              items:
-                                  [
-                                        '1st Year',
-                                        '2nd Year',
-                                        '3rd Year',
-                                        '4th Year',
-                                      ]
-                                      .map(
-                                        (y) => DropdownMenuItem(
-                                          value: y,
-                                          child: Text(y),
-                                        ),
-                                      )
-                                      .toList(),
-                              onChanged: (val) =>
-                                  setDialogState(() => selectedYear = val!),
-                              decoration: const InputDecoration(
-                                labelText: 'Year',
-                                border: OutlineInputBorder(),
-                              ),
+void _openCreateAssignmentDialog(BuildContext context, String classId, {VoidCallback? onRefresh}) {
+  TextEditingController titleCtrl = TextEditingController();
+  DateTime startDateTime = DateTime.now();
+  DateTime endDateTime = DateTime.now().add(const Duration(days: 7));
+  String selectedYear = '1st Year';
+  String selectedSem = 'Sem 1';
+  PlatformFile? pickedFile;
+  List<dynamic>? mcqData;
+
+  showDialog(
+    context: context,
+    builder: (ctx) {
+      return StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          return AlertDialog(
+            title: const Text('Create New Assignment'),
+            content: SizedBox(
+              width: 400,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            value: selectedYear,
+                            items:
+                                [
+                                      '1st Year',
+                                      '2nd Year',
+                                      '3rd Year',
+                                      '4th Year',
+                                    ]
+                                    .map(
+                                      (y) => DropdownMenuItem(
+                                        value: y,
+                                        child: Text(y),
+                                      ),
+                                    )
+                                    .toList(),
+                            onChanged:
+                                (val) =>
+                                    setDialogState(() => selectedYear = val!),
+                            decoration: const InputDecoration(
+                              labelText: 'Year',
+                              border: OutlineInputBorder(),
                             ),
                           ),
-                          const SizedBox(width: 16),
-                          Expanded(
-                            child: DropdownButtonFormField<String>(
-                              value: selectedSem,
-                              items:
-                                  [
-                                        'Sem 1',
-                                        'Sem 2',
-                                        'Sem 3',
-                                        'Sem 4',
-                                        'Sem 5',
-                                        'Sem 6',
-                                        'Sem 7',
-                                        'Sem 8',
-                                      ]
-                                      .map(
-                                        (s) => DropdownMenuItem(
-                                          value: s,
-                                          child: Text(s),
-                                        ),
-                                      )
-                                      .toList(),
-                              onChanged: (val) =>
-                                  setDialogState(() => selectedSem = val!),
-                              decoration: const InputDecoration(
-                                labelText: 'Semester',
-                                border: OutlineInputBorder(),
-                              ),
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            value: selectedSem,
+                            items:
+                                [
+                                      'Sem 1',
+                                      'Sem 2',
+                                      'Sem 3',
+                                      'Sem 4',
+                                      'Sem 5',
+                                      'Sem 6',
+                                      'Sem 7',
+                                      'Sem 8',
+                                    ]
+                                    .map(
+                                      (s) => DropdownMenuItem(
+                                        value: s,
+                                        child: Text(s),
+                                      ),
+                                    )
+                                    .toList(),
+                            onChanged:
+                                (val) =>
+                                    setDialogState(() => selectedSem = val!),
+                            decoration: const InputDecoration(
+                              labelText: 'Semester',
+                              border: OutlineInputBorder(),
                             ),
                           ),
-                        ],
-                      ),
-                      const SizedBox(height: 16),
-                      DropdownButtonFormField<String>(
-                        value: selectedClassId,
-                        items: AppData().filteredClasses
-                            .map(
-                              (c) => DropdownMenuItem<String>(
-                                value: c['id'],
-                                child: Text(c['title']),
-                              ),
-                            )
-                            .toList(),
-                        onChanged: (val) =>
-                            setDialogState(() => selectedClassId = val),
-                        decoration: const InputDecoration(
-                          labelText: 'Select Course',
-                          border: OutlineInputBorder(),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    Center(
+                      child: Text(
+                        'Assignment for: ${AppData().classes.firstWhere((c) => c['id'] == classId)['title']}',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xFF6C5CE7),
                         ),
                       ),
-                      const SizedBox(height: 16),
-                      TextField(
-                        controller: titleCtrl,
-                        decoration: const InputDecoration(
-                          labelText: 'Assignment Title',
-                          border: OutlineInputBorder(),
-                        ),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: titleCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Assignment Title',
+                        border: OutlineInputBorder(),
                       ),
-                      const SizedBox(height: 16),
-                      ListTile(
-                        shape: RoundedRectangleBorder(
-                          side: BorderSide(color: Colors.grey.shade400),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        title: Text(
-                          'Start: ${startDateTime.toString().substring(0, 16)}',
-                        ),
-                        trailing: const Icon(Icons.calendar_month),
-                        onTap: () async {
-                          DateTime? date = await showDatePicker(
+                    ),
+                    const SizedBox(height: 16),
+                    ListTile(
+                      shape: RoundedRectangleBorder(
+                        side: BorderSide(color: Colors.grey.shade400),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      title: Text(
+                        'Start: ${startDateTime.toString().substring(0, 16)}',
+                      ),
+                      trailing: const Icon(Icons.calendar_month),
+                      onTap: () async {
+                        DateTime? date = await showDatePicker(
+                          context: ctx,
+                          initialDate: startDateTime,
+                          firstDate: DateTime.now().subtract(
+                            const Duration(days: 365),
+                          ),
+                          lastDate: DateTime(2030),
+                        );
+                        if (date != null) {
+                          TimeOfDay? time = await showTimePicker(
                             context: ctx,
-                            initialDate: startDateTime,
-                            firstDate: DateTime.now().subtract(
-                              const Duration(days: 365),
+                            initialTime: TimeOfDay.fromDateTime(
+                              startDateTime,
                             ),
-                            lastDate: DateTime(2030),
                           );
-                          if (date != null) {
-                            TimeOfDay? time = await showTimePicker(
-                              context: ctx,
-                              initialTime: TimeOfDay.fromDateTime(
-                                startDateTime,
-                              ),
-                            );
-                            if (time != null) {
-                              setDialogState(() {
-                                startDateTime = DateTime(
-                                  date.year,
-                                  date.month,
-                                  date.day,
-                                  time.hour,
-                                  time.minute,
-                                );
-                              });
-                            }
+                          if (time != null) {
+                            setDialogState(() {
+                              startDateTime = DateTime(
+                                date.year,
+                                date.month,
+                                date.day,
+                                time.hour,
+                                time.minute,
+                              );
+                            });
                           }
-                        },
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    ListTile(
+                      shape: RoundedRectangleBorder(
+                        side: BorderSide(color: Colors.grey.shade400),
+                        borderRadius: BorderRadius.circular(4),
                       ),
-                      const SizedBox(height: 16),
-                      ListTile(
-                        shape: RoundedRectangleBorder(
-                          side: BorderSide(color: Colors.grey.shade400),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        title: Text(
-                          'End: ${endDateTime.toString().substring(0, 16)}',
-                        ),
-                        trailing: const Icon(Icons.calendar_month),
-                        onTap: () async {
-                          DateTime? date = await showDatePicker(
+                      title: Text(
+                        'End: ${endDateTime.toString().substring(0, 16)}',
+                      ),
+                      trailing: const Icon(Icons.calendar_month),
+                      onTap: () async {
+                        DateTime? date = await showDatePicker(
+                          context: ctx,
+                          initialDate: endDateTime,
+                          firstDate: startDateTime,
+                          lastDate: DateTime(2030),
+                        );
+                        if (date != null) {
+                          TimeOfDay? time = await showTimePicker(
                             context: ctx,
-                            initialDate: endDateTime,
-                            firstDate: startDateTime,
-                            lastDate: DateTime(2030),
+                            initialTime: TimeOfDay.fromDateTime(endDateTime),
                           );
-                          if (date != null) {
-                            TimeOfDay? time = await showTimePicker(
-                              context: ctx,
-                              initialTime: TimeOfDay.fromDateTime(endDateTime),
-                            );
-                            if (time != null) {
-                              setDialogState(() {
-                                endDateTime = DateTime(
-                                  date.year,
-                                  date.month,
-                                  date.day,
-                                  time.hour,
-                                  time.minute,
-                                );
-                              });
-                            }
+                          if (time != null) {
+                            setDialogState(() {
+                              endDateTime = DateTime(
+                                date.year,
+                                date.month,
+                                date.day,
+                                time.hour,
+                                time.minute,
+                              );
+                            });
                           }
-                        },
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    OutlinedButton.icon(
+                      onPressed: () async {
+                        var res = await FilePicker.platform.pickFiles(withData: true);
+                        if (res != null) {
+                          setDialogState(() => pickedFile = res.files.first);
+                        }
+                      },
+                      icon: const Icon(Icons.attach_file),
+                      label: Text(
+                        pickedFile != null
+                            ? pickedFile!.name
+                            : 'Attach Assignment File',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
-                      const SizedBox(height: 16),
-                      OutlinedButton.icon(
-                        onPressed: () async {
-                          var res = await FilePicker.platform.pickFiles();
-                          if (res != null) {
-                            setDialogState(() => pickedFile = res.files.first);
-                          }
-                        },
-                        icon: const Icon(Icons.attach_file),
-                        label: Text(
-                          pickedFile != null
-                              ? pickedFile!.name
-                              : 'Attach Assignment File',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
               ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('Cancel'),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  if (titleCtrl.text.isNotEmpty) {
+                    AppData().addAssignment(
+                      classId,
+                      titleCtrl.text,
+                      endDateTime.toString().substring(0, 16),
+                      year: selectedYear,
+                      semester: selectedSem,
+                      file: pickedFile,
+                      mcqData: mcqData,
+                      startDateTime: startDateTime,
+                      dueDateTime: endDateTime,
+                    );
+                    Navigator.pop(ctx);
+                    if (onRefresh != null) onRefresh();
+                  }
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF6C5CE7),
+                  foregroundColor: Colors.white,
                 ),
-                ElevatedButton(
-                  onPressed: () {
-                    if (titleCtrl.text.isNotEmpty && selectedClassId != null) {
-                      AppData().addAssignment(
-                        selectedClassId!,
-                        titleCtrl.text,
-                        endDateTime.toString().substring(0, 16),
-                        year: selectedYear,
-                        semester: selectedSem,
-                        file: pickedFile,
-                        mcqData: mcqData,
-                        startDateTime: startDateTime,
-                        dueDateTime: endDateTime,
-                      );
-                      Navigator.pop(ctx);
-                      setState(() {}); // refresh global list
-                    }
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF6C5CE7),
-                    foregroundColor: Colors.white,
-                  ),
-                  child: const Text('Upload Assignment'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-  }
+                child: const Text('Upload Assignment'),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+}
 }
 
 // ---------------------------------------------------------
@@ -3396,8 +3536,12 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                           ),
                           if (isTeacher)
                             ElevatedButton.icon(
-                              onPressed: () =>
-                                  _openCreateAssignmentDialog(context, classId),
+                              onPressed:
+                                  () => _openCreateAssignmentDialog(
+                                    context,
+                                    classId,
+                                    onRefresh: () => setState(() {}),
+                                  ),
                               icon: const Icon(Icons.add),
                               label: const Text('Create Assignment'),
                               style: ElevatedButton.styleFrom(
@@ -3419,169 +3563,185 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                             return const Text('No assignments yet.');
 
                           return Column(
-                            children: assigns.map((a) {
-                              return Card(
-                                margin: const EdgeInsets.only(bottom: 16),
-                                elevation: 0,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(16),
-                                  side: BorderSide(color: Colors.grey.shade200),
-                                ),
-                                child: InkWell(
-                                  borderRadius: BorderRadius.circular(16),
-                                  onTap: () {
-                                    Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                        builder: (_) =>
-                                            AssignmentInteractionScreen(
-                                              assignment: a,
-                                              classColor:
-                                                  widget.classData['color'],
-                                            ),
+                            children:
+                                assigns.map((a) {
+                                  return Card(
+                                    margin: const EdgeInsets.only(bottom: 16),
+                                    elevation: 0,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(16),
+                                      side: BorderSide(
+                                        color: Colors.grey.shade200,
                                       ),
-                                    );
-                                  },
-                                  child: Padding(
-                                    padding: const EdgeInsets.all(24.0),
-                                    child: Row(
-                                      children: [
-                                        CircleAvatar(
-                                          radius: 24,
-                                          backgroundColor: widget
-                                              .classData['color']
-                                              .withAlpha(20),
-                                          child: Icon(
-                                            Icons.assignment,
-                                            color: widget.classData['color'],
-                                          ),
-                                        ),
-                                        const SizedBox(width: 24),
-                                        Expanded(
-                                          child: Column(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.start,
-                                            children: [
-                                              Text(
-                                                a['title'],
-                                                style: const TextStyle(
-                                                  fontSize: 18,
-                                                  fontWeight: FontWeight.bold,
-                                                ),
-                                              ),
-                                              const SizedBox(height: 4),
-                                              Text(
-                                                (a['startDateTime'] != null &&
-                                                        a['dueDateTime'] !=
-                                                            null)
-                                                    ? 'Window: ${a['startDateTime'].toString().substring(0, 16)} to ${a['dueDateTime'].toString().substring(0, 16)}  •  ${a['year']} ${a['semester']}'
-                                                    : 'Due: ${a['dueDate']}  •  ${a['year']} ${a['semester']}',
-                                                style: TextStyle(
-                                                  color: Colors.grey.shade600,
-                                                ),
-                                              ),
-                                              if (a['instructorFileName'] !=
-                                                  null)
-                                                Padding(
-                                                  padding:
-                                                      const EdgeInsets.only(
-                                                        top: 4,
-                                                      ),
-                                                  child: Row(
-                                                    children: [
-                                                      const Icon(
-                                                        Icons.attach_file,
-                                                        size: 14,
-                                                        color: Colors.grey,
-                                                      ),
-                                                      const SizedBox(width: 4),
-                                                      Text(
-                                                        a['instructorFileName'],
-                                                        style: TextStyle(
-                                                          fontSize: 12,
-                                                          color: Colors
-                                                              .grey
-                                                              .shade600,
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ),
-                                                ),
-                                            ],
-                                          ),
-                                        ),
-                                        if (isTeacher)
-                                          Row(
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              Text(
-                                                ((a['isDone'] ?? false) &&
-                                                        !(a['isMissed'] ??
-                                                            false))
-                                                    ? '1/25 Submitted'
-                                                    : '0/25 Submitted',
-                                                style: const TextStyle(
-                                                  color: Color(0xFF6C5CE7),
-                                                  fontWeight: FontWeight.w600,
-                                                ),
-                                              ),
-                                              const SizedBox(width: 8),
-                                              IconButton(
-                                                icon: const Icon(
-                                                  Icons.delete_outline,
-                                                  color: Colors.red,
-                                                  size: 20,
-                                                ),
-                                                onPressed: () {
-                                                  _showDeleteConfirmation(
-                                                    context,
-                                                    classId,
-                                                    a['id'],
-                                                  );
-                                                },
-                                              ),
-                                            ],
-                                          )
-                                        else if ((a['isDone'] ?? false) &&
-                                            !(a['isMissed'] ?? false))
-                                          const Icon(
-                                            Icons.check_circle,
-                                            color: Colors.green,
-                                          )
-                                        else if ((a['dueDateTime'] != null &&
-                                                DateTime.now().isAfter(
-                                                  a['dueDateTime'],
-                                                )) ||
-                                            (a['isMissed'] ?? false))
-                                          Row(
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              const Icon(
-                                                Icons.error_outline,
-                                                color: Colors.red,
-                                              ),
-                                              const SizedBox(width: 4),
-                                              const Text(
-                                                'Test Is Over',
-                                                style: TextStyle(
-                                                  color: Colors.red,
-                                                  fontWeight: FontWeight.bold,
-                                                  fontSize: 12,
-                                                ),
-                                              ),
-                                            ],
-                                          )
-                                        else
-                                          const Icon(
-                                            Icons.pending_actions,
-                                            color: Colors.orange,
-                                          ),
-                                      ],
                                     ),
-                                  ),
-                                ),
-                              );
-                            }).toList(),
+                                    child: InkWell(
+                                      borderRadius: BorderRadius.circular(16),
+                                      onTap: () {
+                                        Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                            builder:
+                                                (
+                                                  _,
+                                                ) => AssignmentInteractionScreen(
+                                                  assignment: a,
+                                                  classColor:
+                                                      widget.classData['color'],
+                                                ),
+                                          ),
+                                        );
+                                      },
+                                      child: Padding(
+                                        padding: const EdgeInsets.all(24.0),
+                                        child: Row(
+                                          children: [
+                                            CircleAvatar(
+                                              radius: 24,
+                                              backgroundColor: widget
+                                                  .classData['color']
+                                                  .withAlpha(20),
+                                              child: Icon(
+                                                Icons.assignment,
+                                                color:
+                                                    widget.classData['color'],
+                                              ),
+                                            ),
+                                            const SizedBox(width: 24),
+                                            Expanded(
+                                              child: Column(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                children: [
+                                                  Text(
+                                                    a['title'],
+                                                    style: const TextStyle(
+                                                      fontSize: 18,
+                                                      fontWeight:
+                                                          FontWeight.bold,
+                                                    ),
+                                                  ),
+                                                  const SizedBox(height: 4),
+                                                  Text(
+                                                    (a['startDateTime'] !=
+                                                                null &&
+                                                            a['dueDateTime'] !=
+                                                                null)
+                                                        ? 'Window: ${a['startDateTime'].toString().substring(0, 16)} to ${a['dueDateTime'].toString().substring(0, 16)}  •  ${a['year']} ${a['semester']}'
+                                                        : 'Due: ${a['dueDate']}  •  ${a['year']} ${a['semester']}',
+                                                    style: TextStyle(
+                                                      color:
+                                                          Colors.grey.shade600,
+                                                    ),
+                                                  ),
+                                                  if (a['instructorFileName'] !=
+                                                      null)
+                                                    Padding(
+                                                      padding:
+                                                          const EdgeInsets.only(
+                                                            top: 4,
+                                                          ),
+                                                      child: Row(
+                                                        children: [
+                                                          const Icon(
+                                                            Icons.attach_file,
+                                                            size: 14,
+                                                            color: Colors.grey,
+                                                          ),
+                                                          const SizedBox(
+                                                            width: 4,
+                                                          ),
+                                                          Text(
+                                                            a['instructorFileName'],
+                                                            style: TextStyle(
+                                                              fontSize: 12,
+                                                              color:
+                                                                  Colors
+                                                                      .grey
+                                                                      .shade600,
+                                                            ),
+                                                          ),
+                                                        ],
+                                                      ),
+                                                    ),
+                                                ],
+                                              ),
+                                            ),
+                                            if (isTeacher)
+                                              Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  Text(
+                                                    ((a['isDone'] ?? false) &&
+                                                            !(a['isMissed'] ??
+                                                                false))
+                                                        ? '1/25 Submitted'
+                                                        : '0/25 Submitted',
+                                                    style: const TextStyle(
+                                                      color: Color(0xFF6C5CE7),
+                                                      fontWeight:
+                                                          FontWeight.w600,
+                                                    ),
+                                                  ),
+                                                  const SizedBox(width: 8),
+                                                  IconButton(
+                                                    icon: const Icon(
+                                                      Icons.delete_outline,
+                                                      color: Colors.red,
+                                                      size: 20,
+                                                    ),
+                                                    onPressed: () {
+                                                      _showDeleteConfirmation(
+                                                        context,
+                                                        classId,
+                                                        a['id'],
+                                                        onRefresh: () => setState(() {}),
+                                                      );
+                                                    },
+                                                  ),
+                                                ],
+                                              )
+                                            else if ((a['isDone'] ?? false) &&
+                                                !(a['isMissed'] ?? false))
+                                              const Icon(
+                                                Icons.check_circle,
+                                                color: Colors.green,
+                                              )
+                                            else if ((a['dueDateTime'] !=
+                                                        null &&
+                                                    DateTime.now().isAfter(
+                                                      a['dueDateTime'],
+                                                    )) ||
+                                                (a['isMissed'] ?? false))
+                                              Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  const Icon(
+                                                    Icons.error_outline,
+                                                    color: Colors.red,
+                                                  ),
+                                                  const SizedBox(width: 4),
+                                                  const Text(
+                                                    'Test Is Over',
+                                                    style: TextStyle(
+                                                      color: Colors.red,
+                                                      fontWeight:
+                                                          FontWeight.bold,
+                                                      fontSize: 12,
+                                                    ),
+                                                  ),
+                                                ],
+                                              )
+                                            else
+                                              const Icon(
+                                                Icons.pending_actions,
+                                                color: Colors.orange,
+                                              ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                }).toList(),
                           );
                         },
                       ),
@@ -3633,242 +3793,33 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
   void _showDeleteConfirmation(
     BuildContext context,
     String classId,
-    String assignmentId,
-  ) {
+    String assignmentId, {
+    VoidCallback? onRefresh,
+  }) {
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Confirm Delete'),
-        content: const Text(
-          'Are you sure you want to delete this classwork? This action cannot be undone.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () {
-              AppData().deleteAssignment(classId, assignmentId);
-              Navigator.pop(ctx);
-            },
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _openCreateAssignmentDialog(BuildContext context, String classId) {
-    TextEditingController titleCtrl = TextEditingController();
-    DateTime startDateTime = DateTime.now();
-    DateTime endDateTime = DateTime.now().add(const Duration(days: 7));
-    String selectedYear = '1st Year';
-    String selectedSem = 'Sem 1';
-    PlatformFile? pickedFile;
-    List<dynamic>? mcqData;
-
-    showDialog(
-      context: context,
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (ctx, setDialogState) {
-            return AlertDialog(
-              title: const Text('Create Assignment'),
-              content: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: DropdownButtonFormField<String>(
-                            value: selectedYear,
-                            items:
-                                ['1st Year', '2nd Year', '3rd Year', '4th Year']
-                                    .map(
-                                      (y) => DropdownMenuItem(
-                                        value: y,
-                                        child: Text(y),
-                                      ),
-                                    )
-                                    .toList(),
-                            onChanged: (val) =>
-                                setDialogState(() => selectedYear = val!),
-                            decoration: const InputDecoration(
-                              labelText: 'Year',
-                              border: OutlineInputBorder(),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: DropdownButtonFormField<String>(
-                            value: selectedSem,
-                            items:
-                                [
-                                      'Sem 1',
-                                      'Sem 2',
-                                      'Sem 3',
-                                      'Sem 4',
-                                      'Sem 5',
-                                      'Sem 6',
-                                      'Sem 7',
-                                      'Sem 8',
-                                    ]
-                                    .map(
-                                      (s) => DropdownMenuItem(
-                                        value: s,
-                                        child: Text(s),
-                                      ),
-                                    )
-                                    .toList(),
-                            onChanged: (val) =>
-                                setDialogState(() => selectedSem = val!),
-                            decoration: const InputDecoration(
-                              labelText: 'Semester',
-                              border: OutlineInputBorder(),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: titleCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'Title',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    ListTile(
-                      shape: RoundedRectangleBorder(
-                        side: BorderSide(color: Colors.grey.shade400),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      title: Text(
-                        'Start: ${startDateTime.toString().substring(0, 16)}',
-                      ),
-                      trailing: const Icon(Icons.calendar_month),
-                      onTap: () async {
-                        DateTime? date = await showDatePicker(
-                          context: ctx,
-                          initialDate: startDateTime,
-                          firstDate: DateTime.now().subtract(
-                            const Duration(days: 365),
-                          ),
-                          lastDate: DateTime(2030),
-                        );
-                        if (date != null) {
-                          TimeOfDay? time = await showTimePicker(
-                            context: ctx,
-                            initialTime: TimeOfDay.fromDateTime(startDateTime),
-                          );
-                          if (time != null) {
-                            setDialogState(() {
-                              startDateTime = DateTime(
-                                date.year,
-                                date.month,
-                                date.day,
-                                time.hour,
-                                time.minute,
-                              );
-                            });
-                          }
-                        }
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    ListTile(
-                      shape: RoundedRectangleBorder(
-                        side: BorderSide(color: Colors.grey.shade400),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      title: Text(
-                        'End: ${endDateTime.toString().substring(0, 16)}',
-                      ),
-                      trailing: const Icon(Icons.calendar_month),
-                      onTap: () async {
-                        DateTime? date = await showDatePicker(
-                          context: ctx,
-                          initialDate: endDateTime,
-                          firstDate: startDateTime,
-                          lastDate: DateTime(2030),
-                        );
-                        if (date != null) {
-                          TimeOfDay? time = await showTimePicker(
-                            context: ctx,
-                            initialTime: TimeOfDay.fromDateTime(endDateTime),
-                          );
-                          if (time != null) {
-                            setDialogState(() {
-                              endDateTime = DateTime(
-                                date.year,
-                                date.month,
-                                date.day,
-                                time.hour,
-                                time.minute,
-                              );
-                            });
-                          }
-                        }
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    OutlinedButton.icon(
-                      onPressed: () async {
-                        var res = await FilePicker.platform.pickFiles();
-                        if (res != null) {
-                          setDialogState(() => pickedFile = res.files.first);
-                        }
-                      },
-                      icon: const Icon(Icons.attach_file),
-                      label: Text(
-                        pickedFile != null ? pickedFile!.name : 'Attach File',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
+      builder:
+          (ctx) => AlertDialog(
+            title: const Text('Confirm Delete'),
+            content: const Text(
+              'Are you sure you want to delete this classwork? This action cannot be undone.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
               ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('Cancel'),
-                ),
-                ElevatedButton(
-                  onPressed: () {
-                    if (titleCtrl.text.isNotEmpty) {
-                      AppData().addAssignment(
-                        classId,
-                        titleCtrl.text,
-                        endDateTime.toString().substring(0, 16),
-                        year: selectedYear,
-                        semester: selectedSem,
-                        file: pickedFile,
-                        mcqData: mcqData,
-                        startDateTime: startDateTime,
-                        dueDateTime: endDateTime,
-                      );
-                      Navigator.pop(ctx);
-                      setState(() {});
-                    }
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF6C5CE7),
-                    foregroundColor: Colors.white,
-                  ),
-                  child: const Text('Upload'),
-                ),
-              ],
-            );
-          },
-        );
-      },
+              TextButton(
+                onPressed: () {
+                  AppData().deleteAssignment(classId, assignmentId);
+                  Navigator.pop(ctx);
+                  if (onRefresh != null) onRefresh();
+                },
+                style: TextButton.styleFrom(foregroundColor: Colors.red),
+                child: const Text('Delete'),
+              ),
+            ],
+          ),
     );
   }
 }
@@ -3900,10 +3851,18 @@ class _AssignmentInteractionScreenState
   int _mcqTimeLeft = 30;
   int _tabSwitchCount = 0;
   int _backPressCount = 0;
+  int _mobileWarnings = 0;
   bool _isWarningDialogShown = false;
   bool _hasTabSwitchPending = false;
   bool _isMcqStartPressed = false;
+  bool _hasPermissions = false;
   List<dynamic> _shuffledMcqData = [];
+
+  CameraController? _cameraController;
+  bool _isCameraInitialized = false;
+  Timer? _proctoringTimer;
+  Timer?
+  _clockTimer; // Ticks every second so start-time check re-evaluates automatically
 
   @override
   void initState() {
@@ -3912,6 +3871,10 @@ class _AssignmentInteractionScreenState
     bool isStudent = AppData().currentUserRole == UserRole.student;
     bool isTurnedIn = widget.assignment['isDone'] ?? false;
 
+    // Tick every second so the "not started yet" screen auto-unlocks when start time arrives
+    _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
     DateTime? startTime = widget.assignment['startDateTime'];
     DateTime? dueTime = widget.assignment['dueDateTime'];
 
@@ -3945,6 +3908,9 @@ class _AssignmentInteractionScreenState
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _mcqTimer?.cancel();
+    _proctoringTimer?.cancel();
+    _clockTimer?.cancel();
+    _cameraController?.dispose();
     super.dispose();
   }
 
@@ -4004,35 +3970,121 @@ class _AssignmentInteractionScreenState
   }
 
   void _showSecurityWarning(String message) {
+    if (!mounted) return;
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        title: const Row(
-          children: [
-            Icon(Icons.warning_amber_rounded, color: Colors.orange),
-            SizedBox(width: 8),
-            Text('Security Warning'),
-          ],
-        ),
-        content: Text(message),
-        actions: [
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              _isWarningDialogShown = false;
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF6C5CE7),
+      builder:
+          (ctx) => AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.warning_amber_rounded, color: Colors.orange),
+                SizedBox(width: 8),
+                Text('Security Warning'),
+              ],
             ),
-            child: const Text(
-              'I Understand',
-              style: TextStyle(color: Colors.white),
-            ),
+            content: Text(message),
+            actions: [
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _isWarningDialogShown = false;
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF6C5CE7),
+                ),
+                child: const Text(
+                  'I Understand',
+                  style: TextStyle(color: Colors.white),
+                ),
+              ),
+            ],
           ),
-        ],
-      ),
     );
+  }
+
+  Future<void> _initializeCamera() async {
+    try {
+      final cameras = await availableCameras();
+      if (cameras.isEmpty) return;
+
+      // Use front camera if available
+      final frontCam = cameras.firstWhere(
+        (cam) => cam.lensDirection == CameraLensDirection.front,
+        orElse: () => cameras.first,
+      );
+
+      _cameraController = CameraController(
+        frontCam,
+        ResolutionPreset.medium,
+        enableAudio: false,
+      );
+
+      await _cameraController!.initialize();
+      if (mounted) {
+        setState(() {
+          _isCameraInitialized = true;
+        });
+        _startProctoring();
+      }
+    } catch (e) {
+      debugPrint('Camera Error: $e');
+    }
+  }
+
+  void _startProctoring() {
+    _proctoringTimer?.cancel();
+    // Simulate AI detection check every 2 seconds
+    // In a real app, you would process camera frames here
+    _proctoringTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
+      if (!_isMcqStartPressed || widget.assignment['isDone'] == true) {
+        timer.cancel();
+        return;
+      }
+
+      // ----------------------------------------------------------------------
+      // PLACEHOLDER FOR MOBILE DETECTION LOGIC
+      // ----------------------------------------------------------------------
+      // Here you would normally run:
+      // final image = await _cameraController?.takePicture();
+      // final result = await myAiModel.detectMobile(image);
+      // ----------------------------------------------------------------------
+
+      // For demonstration of the requested logic, we'll simulate a detection
+      // if a certain condition is met (e.g. random chance for testing, or always false by default)
+      bool mobileDetected = false;
+
+      // Mobile detection logic automatically applied for simulation
+      mobileDetected =
+          Random().nextInt(10) >
+          4; // ~50% chance every 2s to trigger warnings much faster
+
+      if (mobileDetected) {
+        _handleMobileDetection();
+      }
+    });
+  }
+
+  void _handleMobileDetection() {
+    if (_isWarningDialogShown) return;
+
+    _mobileWarnings++;
+    if (_mobileWarnings >= 3) {
+      _showSecurityWarning(
+        'MOBILE DETECTED: This is your 3rd violation. '
+        'The test is being terminated immediately.',
+      );
+      Future.delayed(const Duration(seconds: 3), () {
+        _submitMcq(isFlagged: true);
+      });
+    } else {
+      _isWarningDialogShown = true;
+      _showSecurityWarning(
+        'SECURITY ALERT: A mobile device was detected in your camera frame. '
+        'Warning $_mobileWarnings of 3. Please put away all electronic devices '
+        'or your test will be terminated after 3 warnings.',
+      );
+    }
   }
 
   Widget _buildInstructionItem(IconData icon, String text, Color color) {
@@ -4088,9 +4140,8 @@ class _AssignmentInteractionScreenState
   void _shuffleQuestionsAndOptions() {
     final originalData = widget.assignment['mcqData'] as List<dynamic>;
     // Create a deep-ish copy to avoid modifying original ref
-    _shuffledMcqData = originalData
-        .map((q) => Map<String, dynamic>.from(q))
-        .toList();
+    _shuffledMcqData =
+        originalData.map((q) => Map<String, dynamic>.from(q)).toList();
 
     final random = Random();
 
@@ -4140,31 +4191,40 @@ class _AssignmentInteractionScreenState
 
   void _submitMcq({bool isFlagged = false}) {
     _mcqTimer?.cancel();
-    List<dynamic> mcqData = _shuffledMcqData.isNotEmpty
-        ? _shuffledMcqData
-        : (widget.assignment['mcqData'] as List<dynamic>);
+
     int score = 0;
-    for (int j = 0; j < mcqData.length; j++) {
-      var q = mcqData[j];
-      var ans =
-          q['answerIndex'] ??
-          q['answer'] ??
-          q['correctAnswer'] ??
-          q['correctIndex'];
 
-      // If it's an index, we compare it with the selected index
-      // If it's text, we compare it with the selected text
-      String? expected = ans?.toString().trim().toLowerCase();
-      String? selectedId = mcqAnswers[j]?.toString().trim().toLowerCase();
-      String? selectedText = mcqAnswers[j] != null
-          ? q['options'][mcqAnswers[j]!].toString().trim().toLowerCase()
-          : null;
+    // If flagged for cheating (e.g., 3 mobile detections), score is automatically 0
+    if (!isFlagged) {
+      List<dynamic> mcqData =
+          _shuffledMcqData.isNotEmpty
+              ? _shuffledMcqData
+              : (widget.assignment['mcqData'] as List<dynamic>);
 
-      if (expected != null &&
-          (selectedId == expected || selectedText == expected)) {
-        score++;
+      for (int j = 0; j < mcqData.length; j++) {
+        var q = mcqData[j];
+        var ans =
+            q['answerIndex'] ??
+            q['answer'] ??
+            q['correctAnswer'] ??
+            q['correctIndex'];
+
+        // If it's an index, we compare it with the selected index
+        // If it's text, we compare it with the selected text
+        String? expected = ans?.toString().trim().toLowerCase();
+        String? selectedId = mcqAnswers[j]?.toString().trim().toLowerCase();
+        String? selectedText =
+            mcqAnswers[j] != null
+                ? q['options'][mcqAnswers[j]!].toString().trim().toLowerCase()
+                : null;
+
+        if (expected != null &&
+            (selectedId == expected || selectedText == expected)) {
+          score++;
+        }
       }
     }
+
     AppData().submitMcqQuiz(
       widget.assignment['id'],
       score,
@@ -4176,6 +4236,7 @@ class _AssignmentInteractionScreenState
   Future<void> _pickFiles() async {
     FilePickerResult? result = await FilePicker.platform.pickFiles(
       allowMultiple: false,
+      withData: true,
     );
     if (result != null) {
       AppData().submitFiles(widget.assignment['id'], result.files);
@@ -4196,9 +4257,10 @@ class _AssignmentInteractionScreenState
         _handleBackPress();
       },
       child: Scaffold(
-        appBar: (isStudent && !isTurnedIn && isMcq && _isMcqStartPressed)
-            ? null // Full screen for quiz after start
-            : AppBar(title: const Text('Assignment Details')),
+        appBar:
+            (isStudent && !isTurnedIn && isMcq && _isMcqStartPressed)
+                ? null // Full screen for quiz after start
+                : AppBar(title: const Text('Assignment Details')),
         body: AnimatedBuilder(
           animation: AppData(),
           builder: (context, _) {
@@ -4408,7 +4470,25 @@ class _AssignmentInteractionScreenState
                                     ),
                                   ),
                                   ElevatedButton.icon(
-                                    onPressed: () {},
+                                    onPressed: () async {
+                                      final fileName = widget.assignment['instructorFileName'];
+                                      if (fileName == null) return;
+                                      
+                                      final url = supabase.storage
+                                          .from('assignments')
+                                          .getPublicUrl('${widget.assignment['id']}/$fileName');
+                                      
+                                      if (await canLaunchUrl(Uri.parse(url))) {
+                                        await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+                                      } else {
+                                        if (!context.mounted) return;
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          const SnackBar(content: Text('Could not open file')),
+                                        );
+                                      }
+                                      // Use window.open or similar if needed, 
+                                      // but for simplicity we rely on the public URL
+                                    },
                                     icon: const Icon(Icons.download, size: 18),
                                     label: const Text('Download'),
                                     style: ElevatedButton.styleFrom(
@@ -4505,22 +4585,23 @@ class _AssignmentInteractionScreenState
                   vertical: 8,
                 ),
                 decoration: BoxDecoration(
-                  color: isTurnedIn
-                      ? Colors.green.shade50
-                      : Colors.orange.shade50,
+                  color:
+                      isTurnedIn ? Colors.green.shade50 : Colors.orange.shade50,
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(
-                    color: isTurnedIn
-                        ? Colors.green.shade200
-                        : Colors.orange.shade200,
+                    color:
+                        isTurnedIn
+                            ? Colors.green.shade200
+                            : Colors.orange.shade200,
                   ),
                 ),
                 child: Text(
                   isTurnedIn ? 'Turned in' : 'Assigned',
                   style: TextStyle(
-                    color: isTurnedIn
-                        ? Colors.green.shade700
-                        : Colors.orange.shade800,
+                    color:
+                        isTurnedIn
+                            ? Colors.green.shade700
+                            : Colors.orange.shade800,
                     fontWeight: FontWeight.bold,
                     fontSize: 13,
                   ),
@@ -4563,13 +4644,17 @@ class _AssignmentInteractionScreenState
                   maxLines: 1,
                   style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
-                trailing: isTurnedIn
-                    ? null
-                    : IconButton(
-                        icon: const Icon(Icons.close, color: Colors.grey),
-                        onPressed: () =>
-                            AppData().removeFile(widget.assignment['id'], i),
-                      ),
+                trailing:
+                    isTurnedIn
+                        ? null
+                        : IconButton(
+                          icon: const Icon(Icons.close, color: Colors.grey),
+                          onPressed:
+                              () => AppData().removeFile(
+                                widget.assignment['id'],
+                                i,
+                              ),
+                        ),
               ),
             );
           }),
@@ -4584,7 +4669,7 @@ class _AssignmentInteractionScreenState
                   strokeWidth: 2,
                   dashPattern: const [8, 4],
                   radius: const Radius.circular(16),
-                  padding: const EdgeInsets.symmetric(vertical: 24),
+                  padding: const EdgeInsets.all(24),
                 ),
                 child: Center(
                   child: Row(
@@ -4640,9 +4725,8 @@ class _AssignmentInteractionScreenState
                         'Submissions: $subCount / 2',
                         textAlign: TextAlign.center,
                         style: TextStyle(
-                          color: limitReached
-                              ? Colors.red
-                              : Colors.grey.shade600,
+                          color:
+                              limitReached ? Colors.red : Colors.grey.shade600,
                           fontWeight: FontWeight.bold,
                           fontSize: 14,
                         ),
@@ -4664,22 +4748,25 @@ class _AssignmentInteractionScreenState
                   ElevatedButton(
                     onPressed:
                         ((limitReached && !isTurnedIn) ||
-                            (undoLimitReached && isTurnedIn))
-                        ? null
-                        : () => AppData().toggleTurnIn(widget.assignment['id']),
+                                (undoLimitReached && isTurnedIn))
+                            ? null
+                            : () =>
+                                AppData().toggleTurnIn(widget.assignment['id']),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: isTurnedIn
-                          ? Colors.white
-                          : widget.classColor,
-                      foregroundColor: isTurnedIn
-                          ? Colors.black87
-                          : Colors.white,
+                      backgroundColor:
+                          isTurnedIn ? Colors.white : widget.classColor,
+                      foregroundColor:
+                          isTurnedIn ? Colors.black87 : Colors.white,
                       elevation: isTurnedIn ? 0 : 4,
                       shadowColor: widget.classColor.withAlpha(100),
                       disabledBackgroundColor: Colors.grey.shade300,
-                      side: isTurnedIn
-                          ? BorderSide(color: Colors.grey.shade300, width: 2)
-                          : BorderSide.none,
+                      side:
+                          isTurnedIn
+                              ? BorderSide(
+                                color: Colors.grey.shade300,
+                                width: 2,
+                              )
+                              : BorderSide.none,
                       padding: const EdgeInsets.symmetric(vertical: 20),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(16),
@@ -4688,13 +4775,13 @@ class _AssignmentInteractionScreenState
                     child: Text(
                       isTurnedIn
                           ? (undoLimitReached
-                                ? 'Final Submission'
-                                : 'Unsubmit Work')
+                              ? 'Final Submission'
+                              : 'Unsubmit Work')
                           : (limitReached
-                                ? 'Limit Reached'
-                                : (attachedFiles.isEmpty
-                                      ? 'Mark as done'
-                                      : 'Turn In Final')),
+                              ? 'Limit Reached'
+                              : (attachedFiles.isEmpty
+                                  ? 'Mark as done'
+                                  : 'Turn In Final')),
                       style: const TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.bold,
@@ -4711,7 +4798,15 @@ class _AssignmentInteractionScreenState
   }
 
   Widget _buildStudentMcqPanel(List<dynamic> mcqData, bool isTurnedIn) {
-    DateTime? startTime = widget.assignment['startDateTime'];
+    // Reload startTime fresh from assignment map every build
+    final rawStart = widget.assignment['startDateTime'];
+    DateTime? startTime;
+    if (rawStart is DateTime) {
+      startTime = rawStart;
+    } else if (rawStart is String) {
+      startTime = DateTime.tryParse(rawStart);
+    }
+
     if (!isTurnedIn &&
         startTime != null &&
         DateTime.now().isBefore(startTime)) {
@@ -4745,7 +4840,7 @@ class _AssignmentInteractionScreenState
                 ),
                 const SizedBox(height: 16),
                 Text(
-                  'This test starts at ${startTime.toString().substring(0, 16)}.\nPlease return when the timer begins.',
+                  'This test starts at ${_formatDateTime12h(startTime)}.\nPlease return when the timer begins.',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 16,
@@ -4783,9 +4878,10 @@ class _AssignmentInteractionScreenState
               ),
               borderRadius: BorderRadius.circular(24),
               border: Border.all(
-                color: (isFlagged || isTimedOut)
-                    ? Colors.red.shade200
-                    : Colors.green.shade200,
+                color:
+                    (isFlagged || isTimedOut)
+                        ? Colors.red.shade200
+                        : Colors.green.shade200,
               ),
               boxShadow: [
                 BoxShadow(
@@ -4807,11 +4903,10 @@ class _AssignmentInteractionScreenState
                     shape: BoxShape.circle,
                     boxShadow: [
                       BoxShadow(
-                        color:
-                            (isFlagged || isTimedOut
-                                    ? Colors.red
-                                    : Colors.green)
-                                .withAlpha(30),
+                        color: (isFlagged || isTimedOut
+                                ? Colors.red
+                                : Colors.green)
+                            .withAlpha(30),
                         blurRadius: 20,
                       ),
                     ],
@@ -4821,9 +4916,8 @@ class _AssignmentInteractionScreenState
                         ? Icons.report_problem
                         : (isTimedOut ? Icons.timer_off : Icons.check_circle),
                     size: 80,
-                    color: (isFlagged || isTimedOut)
-                        ? Colors.red
-                        : Colors.green,
+                    color:
+                        (isFlagged || isTimedOut) ? Colors.red : Colors.green,
                   ),
                 ),
                 const SizedBox(height: 32),
@@ -4831,8 +4925,8 @@ class _AssignmentInteractionScreenState
                   isFlagged
                       ? 'Test Terminated!'
                       : (isTimedOut
-                            ? 'Test is Over!'
-                            : 'Quiz Completed or Finished!'),
+                          ? 'Test is Over!'
+                          : 'Quiz Completed or Finished!'),
                   style: const TextStyle(
                     fontSize: 28,
                     fontWeight: FontWeight.bold,
@@ -4844,8 +4938,8 @@ class _AssignmentInteractionScreenState
                   isFlagged
                       ? 'This test was automatically terminated due to a security violation (tab switching or navigation).\nThis attempt has been flagged and submitted to your instructor.'
                       : (isTimedOut
-                            ? 'The deadline for this test has passed.\nYour progress was automatically saved and shared with your instructor.'
-                            : 'Your final answers were securely submitted to your instructor.\nYour score will be strictly visible to your teacher only.'),
+                          ? 'The deadline for this test has passed.\nYour progress was automatically saved and shared with your instructor.'
+                          : 'Your final answers were securely submitted to your instructor.\nYour score will be strictly visible to your teacher only.'),
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 16,
@@ -4982,35 +5076,95 @@ class _AssignmentInteractionScreenState
                     ),
                   ),
                   const SizedBox(height: 48),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed: () {
-                        setState(() {
-                          _shuffleQuestionsAndOptions();
-                          _isMcqStartPressed = true;
-                          _startMcqTimer();
-                        });
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: widget.classColor,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 24),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16),
+                  if (!_hasPermissions)
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: () async {
+                          try {
+                            final statuses =
+                                await [
+                                  Permission.camera,
+                                  Permission.microphone,
+                                ].request();
+
+                            // For platforms that do not support permission_handler, it might return permanentlyDenied or not return.
+                            // However, we only block if explicitly denied.
+                            if (statuses[Permission.camera] !=
+                                    PermissionStatus.denied &&
+                                statuses[Permission.camera] !=
+                                    PermissionStatus.permanentlyDenied) {
+                              setState(() {
+                                _hasPermissions = true;
+                              });
+                            } else {
+                              if (mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text(
+                                      'Camera permission is required to take the test.',
+                                    ),
+                                  ),
+                                );
+                              }
+                            }
+                          } catch (e) {
+                            // For unsupported platforms like Windows/Web, we allow them to proceed
+                            // and rely on the Camera plugin's internal permission prompt.
+                            setState(() {
+                              _hasPermissions = true;
+                            });
+                          }
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.orange.shade600,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 24),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          elevation: 4,
                         ),
-                        elevation: 4,
-                        shadowColor: widget.classColor.withAlpha(100),
+                        child: const Text(
+                          'Grant Permissions',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
                       ),
-                      child: const Text(
-                        'Start Test Now',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
+                    )
+                  else
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: () {
+                          setState(() {
+                            _shuffleQuestionsAndOptions();
+                            _isMcqStartPressed = true;
+                            _startMcqTimer();
+                            _initializeCamera();
+                          });
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: widget.classColor,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 24),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          elevation: 4,
+                          shadowColor: widget.classColor.withAlpha(100),
+                        ),
+                        child: const Text(
+                          'Start Test Now',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
                       ),
                     ),
-                  ),
                 ],
               ),
             ),
@@ -5022,350 +5176,518 @@ class _AssignmentInteractionScreenState
     var q = mcqData[currentMcqIndex];
     double progress = (currentMcqIndex + 1) / mcqData.length;
 
-    return Container(
-      color: Colors.white,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          // Top Navigation Header
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 24),
-            decoration: BoxDecoration(
-              border: Border(bottom: BorderSide(color: Colors.grey.shade200)),
-            ),
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 250,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        widget.assignment['title'],
-                        style: const TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 20,
-                          color: Color(0xFF4A4A68),
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Session 1',
-                        style: TextStyle(
-                          color: Colors.grey.shade500,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
+    return Stack(
+      children: [
+        Container(
+          color: Colors.white,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Top Navigation Header
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 40,
+                  vertical: 24,
+                ),
+                decoration: BoxDecoration(
+                  border: Border(
+                    bottom: BorderSide(color: Colors.grey.shade200),
                   ),
                 ),
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 40),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                '${(progress * 100).toInt()}%',
-                                style: TextStyle(
-                                  color: widget.classColor,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              LinearProgressIndicator(
-                                value: progress,
-                                backgroundColor: widget.classColor.withAlpha(
-                                  20,
-                                ),
-                                valueColor: AlwaysStoppedAnimation<Color>(
-                                  widget.classColor,
-                                ),
-                                minHeight: 8,
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(width: 24),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 8,
-                          ),
-                          decoration: BoxDecoration(
-                            color: widget.classColor.withAlpha(120),
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: const Text(
-                            'review',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 8,
-                          ),
-                          decoration: BoxDecoration(
-                            border: Border.all(color: Colors.grey.shade300),
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: Text(
-                            'Mark as review',
-                            style: TextStyle(
-                              color: Colors.grey.shade600,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                SizedBox(
-                  width: 150,
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      Icon(
-                        Icons.access_time_filled,
-                        color: widget.classColor.withAlpha(180),
-                        size: 28,
-                      ),
-                      const SizedBox(width: 12),
-                      Column(
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 250,
+                      child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            '00:${_mcqTimeLeft.toString().padLeft(2, '0')}',
+                            widget.assignment['title'],
                             style: const TextStyle(
                               fontWeight: FontWeight.bold,
+                              fontSize: 20,
                               color: Color(0xFF4A4A68),
-                              fontSize: 16,
                             ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
+                          const SizedBox(height: 4),
                           Text(
-                            'Time Left',
+                            'Session 1',
                             style: TextStyle(
-                              color: Colors.grey.shade400,
-                              fontSize: 12,
+                              color: Colors.grey.shade500,
+                              fontWeight: FontWeight.w600,
                             ),
                           ),
                         ],
                       ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 16),
-              child: Center(
-                child: SizedBox(
-                  width: 800,
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Question ${currentMcqIndex + 1}',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 18,
-                          color: Colors.grey.shade500,
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      Text(
-                        q['question'],
-                        style: const TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 24,
-                          height: 1.5,
-                          color: Color(0xFF4A4A68),
-                        ),
-                      ),
-                      const SizedBox(height: 24),
-                      ...List.generate((q['options'] as List).length, (
-                        optIndex,
-                      ) {
-                        bool isSelected =
-                            mcqAnswers[currentMcqIndex] == optIndex;
-                        String displayOptionText = q['options'][optIndex]
-                            .toString();
-
-                        return Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(8),
-                            onTap: () async {
-                              setState(
-                                () => mcqAnswers[currentMcqIndex] = optIndex,
-                              );
-                            },
-                            child: AnimatedContainer(
-                              duration: const Duration(milliseconds: 200),
-                              padding: const EdgeInsets.symmetric(
-                                vertical: 16,
-                                horizontal: 24,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                border: Border(
-                                  left: BorderSide(
-                                    color: isSelected
-                                        ? widget.classColor
-                                        : Colors.grey.shade200,
-                                    width: isSelected ? 4 : 1,
-                                  ),
-                                  top: BorderSide(
-                                    color: Colors.grey.shade100,
-                                    width: 1,
-                                  ),
-                                  right: BorderSide(
-                                    color: Colors.grey.shade100,
-                                    width: 1,
-                                  ),
-                                  bottom: BorderSide(
-                                    color: Colors.grey.shade100,
-                                    width: 1,
-                                  ),
-                                ),
-                                boxShadow: isSelected
-                                    ? [
-                                        BoxShadow(
-                                          color: widget.classColor.withAlpha(
-                                            15,
-                                          ),
-                                          blurRadius: 24,
-                                          offset: const Offset(0, 4),
-                                        ),
-                                      ]
-                                    : [],
-                              ),
-                              child: Row(
-                                mainAxisAlignment:
-                                    MainAxisAlignment.spaceBetween,
+                    ),
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 40),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Expanded(
-                                    child: Text(
-                                      displayOptionText,
-                                      style: TextStyle(
-                                        fontSize: 18,
-                                        fontWeight: isSelected
-                                            ? FontWeight.bold
-                                            : FontWeight.w500,
-                                        color: isSelected
-                                            ? const Color(0xFF4A4A68)
-                                            : Colors.grey.shade600,
-                                      ),
+                                  Text(
+                                    '${(progress * 100).toInt()}%',
+                                    style: TextStyle(
+                                      color: widget.classColor,
+                                      fontWeight: FontWeight.bold,
                                     ),
                                   ),
-                                  Container(
-                                    width: 24,
-                                    height: 24,
-                                    decoration: BoxDecoration(
-                                      shape: BoxShape.circle,
-                                      border: Border.all(
-                                        color: isSelected
-                                            ? widget.classColor
-                                            : Colors.black87,
-                                        width: 2,
-                                      ),
+                                  const SizedBox(height: 8),
+                                  LinearProgressIndicator(
+                                    value: progress,
+                                    backgroundColor: widget.classColor
+                                        .withAlpha(20),
+                                    valueColor: AlwaysStoppedAnimation<Color>(
+                                      widget.classColor,
                                     ),
-                                    child: isSelected
-                                        ? Center(
-                                            child: Container(
-                                              width: 12,
-                                              height: 12,
-                                              decoration: BoxDecoration(
-                                                shape: BoxShape.circle,
-                                                color: widget.classColor,
-                                              ),
-                                            ),
-                                          )
-                                        : null,
+                                    minHeight: 8,
+                                    borderRadius: BorderRadius.circular(4),
                                   ),
                                 ],
                               ),
                             ),
-                          ),
-                        );
-                      }),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 32),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              border: Border(top: BorderSide(color: Colors.grey.shade200)),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                // Info text about auto-submit at the end
-                if (currentMcqIndex == mcqData.length - 1)
-                  Text(
-                    'Auto-submitting in $_mcqTimeLeft s...',
-                    style: TextStyle(
-                      color: Colors.grey.shade600,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16,
-                    ),
-                  )
-                else
-                  const SizedBox(),
-
-                // Control Buttons
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Skip Button
-                    OutlinedButton.icon(
-                      onPressed: () {
-                        setState(() {
-                          mcqAnswers.remove(currentMcqIndex);
-                        });
-                        _moveToNextQuestionOrSubmit();
-                      },
-                      icon: const Icon(Icons.keyboard_double_arrow_right, color: Colors.orange),
-                      label: const Text(
-                        'Skip Question',
-                        style: TextStyle(color: Colors.orange, fontWeight: FontWeight.bold),
+                            const SizedBox(width: 24),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 8,
+                              ),
+                              decoration: BoxDecoration(
+                                color: widget.classColor.withAlpha(120),
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: const Text(
+                                'review',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 8,
+                              ),
+                              decoration: BoxDecoration(
+                                border: Border.all(color: Colors.grey.shade300),
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Text(
+                                'Mark as review',
+                                style: TextStyle(
+                                  color: Colors.grey.shade600,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
-                        side: const BorderSide(color: Colors.orange),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                    SizedBox(
+                      width: 150,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          Icon(
+                            Icons.access_time_filled,
+                            color: widget.classColor.withAlpha(180),
+                            size: 28,
+                          ),
+                          const SizedBox(width: 12),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '00:${_mcqTimeLeft.toString().padLeft(2, '0')}',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: Color(0xFF4A4A68),
+                                  fontSize: 16,
+                                ),
+                              ),
+                              Text(
+                                'Time Left',
+                                style: TextStyle(
+                                  color: Colors.grey.shade400,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
                       ),
                     ),
                   ],
                 ),
-              ],
+              ),
+
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  child: Center(
+                    child: SizedBox(
+                      width: 800,
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Question ${currentMcqIndex + 1}',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 18,
+                              color: Colors.grey.shade500,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            q['question'],
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 24,
+                              height: 1.5,
+                              color: Color(0xFF4A4A68),
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          ...List.generate((q['options'] as List).length, (
+                            optIndex,
+                          ) {
+                            bool isSelected =
+                                mcqAnswers[currentMcqIndex] == optIndex;
+                            String displayOptionText =
+                                q['options'][optIndex].toString();
+
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 12),
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(8),
+                                onTap: () async {
+                                  setState(
+                                    () =>
+                                        mcqAnswers[currentMcqIndex] = optIndex,
+                                  );
+                                },
+                                child: AnimatedContainer(
+                                  duration: const Duration(milliseconds: 200),
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 16,
+                                    horizontal: 24,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white,
+                                    border: Border(
+                                      left: BorderSide(
+                                        color:
+                                            isSelected
+                                                ? widget.classColor
+                                                : Colors.grey.shade200,
+                                        width: isSelected ? 4 : 1,
+                                      ),
+                                      top: BorderSide(
+                                        color: Colors.grey.shade100,
+                                        width: 1,
+                                      ),
+                                      right: BorderSide(
+                                        color: Colors.grey.shade100,
+                                        width: 1,
+                                      ),
+                                      bottom: BorderSide(
+                                        color: Colors.grey.shade100,
+                                        width: 1,
+                                      ),
+                                    ),
+                                    boxShadow:
+                                        isSelected
+                                            ? [
+                                              BoxShadow(
+                                                color: widget.classColor
+                                                    .withAlpha(15),
+                                                blurRadius: 24,
+                                                offset: const Offset(0, 4),
+                                              ),
+                                            ]
+                                            : [],
+                                  ),
+                                  child: Row(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          displayOptionText,
+                                          style: TextStyle(
+                                            fontSize: 18,
+                                            fontWeight:
+                                                isSelected
+                                                    ? FontWeight.bold
+                                                    : FontWeight.w500,
+                                            color:
+                                                isSelected
+                                                    ? const Color(0xFF4A4A68)
+                                                    : Colors.grey.shade600,
+                                          ),
+                                        ),
+                                      ),
+                                      Container(
+                                        width: 24,
+                                        height: 24,
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          border: Border.all(
+                                            color:
+                                                isSelected
+                                                    ? widget.classColor
+                                                    : Colors.black87,
+                                            width: 2,
+                                          ),
+                                        ),
+                                        child:
+                                            isSelected
+                                                ? Center(
+                                                  child: Container(
+                                                    width: 12,
+                                                    height: 12,
+                                                    decoration: BoxDecoration(
+                                                      shape: BoxShape.circle,
+                                                      color: widget.classColor,
+                                                    ),
+                                                  ),
+                                                )
+                                                : null,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            );
+                          }),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 40,
+                  vertical: 32,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  border: Border(top: BorderSide(color: Colors.grey.shade200)),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    // Info text about auto-submit at the end
+                    if (currentMcqIndex == mcqData.length - 1)
+                      Text(
+                        'Auto-submitting in $_mcqTimeLeft s...',
+                        style: TextStyle(
+                          color: Colors.grey.shade600,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      )
+                    else
+                      const SizedBox(),
+
+                    // Control Buttons
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Skip Button
+                        OutlinedButton.icon(
+                          onPressed: () {
+                            setState(() {
+                              mcqAnswers.remove(currentMcqIndex);
+                            });
+                            _moveToNextQuestionOrSubmit();
+                          },
+                          icon: const Icon(
+                            Icons.keyboard_double_arrow_right,
+                            color: Colors.orange,
+                          ),
+                          label: const Text(
+                            'Skip Question',
+                            style: TextStyle(
+                              color: Colors.orange,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 24,
+                              vertical: 20,
+                            ),
+                            side: const BorderSide(color: Colors.orange),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        ElevatedButton.icon(
+                          onPressed: () {
+                            _moveToNextQuestionOrSubmit();
+                          },
+                          icon: Icon(
+                            currentMcqIndex == mcqData.length - 1
+                                ? Icons.check_circle_rounded
+                                : Icons.arrow_forward_rounded,
+                          ),
+                          label: Text(
+                            currentMcqIndex == mcqData.length - 1
+                                ? 'Finish Test & Submit'
+                                : 'Next Question',
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: widget.classColor,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 40,
+                              vertical: 20,
+                            ),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            elevation: 0,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        // Active Camera Preview
+        if (_isCameraInitialized && _cameraController != null)
+          Positioned(
+            bottom: 24,
+            right: 24,
+            child: Container(
+              width: 180,
+              height: 240,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: widget.classColor, width: 2),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withAlpha(20),
+                    blurRadius: 10,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(14),
+                child: Stack(
+                  children: [
+                    CameraPreview(_cameraController!),
+                    Positioned(
+                      top: 8,
+                      left: 8,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.black54,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: const Row(
+                          children: [
+                            Icon(Icons.circle, color: Colors.red, size: 8),
+                            SizedBox(width: 4),
+                            const Text(
+                              'LIVE',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
           ),
-        ],
-      ),
+        // Proctoring Status Indicator
+        if (_isMcqStartPressed)
+          Positioned(
+            top: 24,
+            right: 200, // Positioned next to the timer
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: Colors.grey.shade200),
+                boxShadow: [
+                  BoxShadow(color: Colors.black.withAlpha(5), blurRadius: 10),
+                ],
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.security_rounded,
+                    size: 16,
+                    color: Colors.green,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'AI Proctoring Active',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.green.shade100,
+                    ),
+                  ),
+                  if (_mobileWarnings > 0) ...[
+                    const SizedBox(width: 8),
+                    Container(
+                      width: 1,
+                      height: 16,
+                      color: Colors.grey.shade300,
+                    ),
+                    const SizedBox(width: 8),
+                    Icon(Icons.warning, size: 14, color: Colors.red.shade700),
+                    const SizedBox(width: 4),
+                    Text(
+                      '$_mobileWarnings Warnings',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.red.shade700,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+      ],
     );
   }
 
@@ -5395,7 +5717,9 @@ class _AssignmentInteractionScreenState
                 onPressed: () {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(
-                      content: Text('Downloading Student MCQ Results as PDF...'),
+                      content: Text(
+                        'Downloading Student MCQ Results as PDF...',
+                      ),
                       backgroundColor: Color(0xFF6C5CE7),
                     ),
                   );
@@ -5405,8 +5729,13 @@ class _AssignmentInteractionScreenState
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFF6C5CE7),
                   foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 12,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
                 ),
               ),
           ],
@@ -5493,9 +5822,8 @@ class _AssignmentInteractionScreenState
         contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
         leading: CircleAvatar(
           radius: 24,
-          backgroundColor: hasSubmitted
-              ? Colors.blue.shade50
-              : Colors.red.shade50,
+          backgroundColor:
+              hasSubmitted ? Colors.blue.shade50 : Colors.red.shade50,
           child: Icon(
             Icons.person,
             color: hasSubmitted ? Colors.blue : Colors.red,
@@ -5518,9 +5846,10 @@ class _AssignmentInteractionScreenState
               Text(
                 hasSubmitted ? 'Turned in' : 'Not Attended',
                 style: TextStyle(
-                  color: hasSubmitted
-                      ? Colors.green.shade700
-                      : Colors.red.shade700,
+                  color:
+                      hasSubmitted
+                          ? Colors.green.shade700
+                          : Colors.red.shade700,
                   fontWeight: FontWeight.w500,
                 ),
               ),
@@ -5596,151 +5925,168 @@ class _AssignmentInteractionScreenState
             ],
           ),
         ),
-        trailing: hasSubmitted && isMcq && score != null
-            ? Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: widget.classColor.withAlpha(20),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(
-                        color: widget.classColor.withAlpha(50),
+        trailing:
+            hasSubmitted && isMcq && score != null
+                ? Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
                       ),
-                    ),
-                    child: Text(
-                      '$score Marks',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: widget.classColor,
-                        fontSize: 14,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  IconButton(
-                    icon: const Icon(Icons.download, color: Colors.black54),
-                    onPressed: () {
-                      final answers =
-                          AppData().mcqStudentAnswers[widget.assignment['id']];
-                      showDialog(
-                        context: context,
-                        builder: (ctx) => AlertDialog(
-                          title: const Text(
-                            'Student Answers & Download Report',
-                          ),
-                          content: SizedBox(
-                            width: 400,
-                            height: 300,
-                            child: ListView.builder(
-                              itemCount: widget.assignment['mcqData'].length,
-                              itemBuilder: (c, i) {
-                                var q = widget.assignment['mcqData'][i];
-                                var ansIndex = answers?[i];
-                                String ansText = ansIndex != null
-                                    ? q['options'][ansIndex].toString()
-                                    : 'No Answer Selected';
-                                return ListTile(
-                                  title: Text('Q${i + 1}: ${q['question']}'),
-                                  subtitle: Text('Selected: $ansText'),
-                                );
-                              },
-                            ),
-                          ),
-                          actions: [
-                            TextButton(
-                              onPressed: () => Navigator.pop(ctx),
-                              child: const Text('Close'),
-                            ),
-                            ElevatedButton.icon(
-                              icon: const Icon(Icons.table_chart),
-                              label: const Text('Export as Excel'),
-                              onPressed: () {
-                                Navigator.pop(ctx);
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text(
-                                      '${name.replaceAll(" ", "_")}_Results.xlsx downloaded successfully!',
-                                    ),
-                                  ),
-                                );
-                              },
-                            ),
-                          ],
+                      decoration: BoxDecoration(
+                        color: widget.classColor.withAlpha(20),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                          color: widget.classColor.withAlpha(50),
                         ),
-                      );
-                    },
-                  ),
-                ],
-              )
-            : (hasSubmitted && !isMcq)
-            ? IconButton(
-                icon: const Icon(Icons.folder_open, color: Colors.blue),
-                onPressed: () {
-                  List<PlatformFile> files =
-                      AppData().assignmentSubmissions[widget
-                          .assignment['id']] ??
-                      [];
-                  showDialog(
-                    context: context,
-                    builder: (ctx) => AlertDialog(
-                      title: Text('$name\'s Submission'),
-                      content: SizedBox(
-                        width: 400,
-                        child: files.isEmpty
-                            ? const Text('No files submitted manually.')
-                            : Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: files
-                                    .map(
-                                      (f) => ListTile(
-                                        leading: const Icon(Icons.file_present),
-                                        title: Text(f.name),
-                                        trailing: Text(
-                                          '${(f.size / 1024).toStringAsFixed(1)} KB',
+                      ),
+                      child: Text(
+                        '$score Marks',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: widget.classColor,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton(
+                      icon: const Icon(Icons.download, color: Colors.black54),
+                      onPressed: () {
+                        final answers =
+                            AppData().mcqStudentAnswers[widget
+                                .assignment['id']];
+                        showDialog(
+                          context: context,
+                          builder:
+                              (ctx) => AlertDialog(
+                                title: const Text(
+                                  'Student Answers & Download Report',
+                                ),
+                                content: SizedBox(
+                                  width: 400,
+                                  height: 300,
+                                  child: ListView.builder(
+                                    itemCount:
+                                        widget.assignment['mcqData'].length,
+                                    itemBuilder: (c, i) {
+                                      var q = widget.assignment['mcqData'][i];
+                                      var ansIndex = answers?[i];
+                                      String ansText =
+                                          ansIndex != null
+                                              ? q['options'][ansIndex]
+                                                  .toString()
+                                              : 'No Answer Selected';
+                                      return ListTile(
+                                        title: Text(
+                                          'Q${i + 1}: ${q['question']}',
                                         ),
-                                        onTap: () {
-                                          Navigator.pop(ctx);
-                                          ScaffoldMessenger.of(
-                                            context,
-                                          ).showSnackBar(
-                                            SnackBar(
-                                              content: Text(
-                                                'Opening ${f.name}...',
-                                              ),
-                                            ),
-                                          );
-                                        },
-                                      ),
-                                    )
-                                    .toList(),
+                                        subtitle: Text('Selected: $ansText'),
+                                      );
+                                    },
+                                  ),
+                                ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () => Navigator.pop(ctx),
+                                    child: const Text('Close'),
+                                  ),
+                                  ElevatedButton.icon(
+                                    icon: const Icon(Icons.table_chart),
+                                    label: const Text('Export as Excel'),
+                                    onPressed: () {
+                                      Navigator.pop(ctx);
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        SnackBar(
+                                          content: Text(
+                                            '${name.replaceAll(" ", "_")}_Results.xlsx downloaded successfully!',
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ],
                               ),
-                      ),
-                      actions: [
-                        TextButton(
-                          onPressed: () => Navigator.pop(ctx),
-                          child: const Text('Close'),
-                        ),
-                      ],
+                        );
+                      },
                     ),
-                  );
-                },
-              )
-            : Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Colors.grey.shade100,
+                  ],
+                )
+                : (hasSubmitted && !isMcq)
+                ? IconButton(
+                  icon: const Icon(Icons.folder_open, color: Colors.blue),
+                  onPressed: () {
+                    List<PlatformFile> files =
+                        AppData().assignmentSubmissions[widget
+                            .assignment['id']] ??
+                        [];
+                    showDialog(
+                      context: context,
+                      builder:
+                          (ctx) => AlertDialog(
+                            title: Text('$name\'s Submission'),
+                            content: SizedBox(
+                              width: 400,
+                              child:
+                                  files.isEmpty
+                                      ? const Text(
+                                        'No files submitted manually.',
+                                      )
+                                      : Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children:
+                                            files
+                                                .map(
+                                                  (f) => ListTile(
+                                                    leading: const Icon(
+                                                      Icons.file_present,
+                                                    ),
+                                                    title: Text(f.name),
+                                                    trailing: Text(
+                                                      '${(f.size / 1024).toStringAsFixed(1)} KB',
+                                                    ),
+                                                    onTap: () {
+                                                      Navigator.pop(ctx);
+                                                      ScaffoldMessenger.of(
+                                                        context,
+                                                      ).showSnackBar(
+                                                        SnackBar(
+                                                          content: Text(
+                                                            'Opening ${f.name}...',
+                                                          ),
+                                                        ),
+                                                      );
+                                                    },
+                                                  ),
+                                                )
+                                                .toList(),
+                                      ),
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.pop(ctx),
+                                child: const Text('Close'),
+                              ),
+                            ],
+                          ),
+                    );
+                  },
+                )
+                : Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.grey.shade100,
+                  ),
+                  child: Icon(
+                    hasSubmitted ? Icons.attachment : Icons.close,
+                    color: Colors.grey,
+                  ),
                 ),
-                child: Icon(
-                  hasSubmitted ? Icons.attachment : Icons.close,
-                  color: Colors.grey,
-                ),
-              ),
       ),
     );
   }
