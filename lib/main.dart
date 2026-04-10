@@ -10,7 +10,10 @@ import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'auth.dart';
+
+List<CameraDescription> cameras = [];
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -24,6 +27,12 @@ Future<void> main() async {
   } catch (e) {
     debugPrint('Supabase init failed. Please update the URL and Anon Key.');
   }
+  try {
+    cameras = await availableCameras();
+  } catch (e) {
+    debugPrint('No cameras found: $e');
+  }
+
   runApp(const PTU_PORTALApp());
 }
 
@@ -44,12 +53,65 @@ String _formatDateTime12h(DateTime? dt) {
 // ---------------------------------------------------------
 enum UserRole { student, teacher }
 
-enum NavPage { dashboard, courses, liveClass, assignments, mcq }
+enum NavPage { dashboard, courses, liveClass, assignments, mcq, profile }
 
 class AppData extends ChangeNotifier {
   static final AppData _instance = AppData._internal();
   factory AppData() => _instance;
-  AppData._internal();
+  AppData._internal() {
+    loadSession();
+  }
+
+  Future<void> saveSession() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('isLoggedIn', isLoggedIn);
+    await prefs.setString('currentUserRole', currentUserRole.name);
+    await prefs.setString('loggedEmail', loggedEmail ?? '');
+    await prefs.setString('loggedPhone', loggedPhone ?? '');
+    await prefs.setString('loggedEnrollNo', loggedEnrollNo ?? '');
+    await prefs.setString('loggedTeacherId', loggedTeacherId ?? '');
+    await prefs.setString('loggedName', loggedName ?? '');
+    await prefs.setString('loggedDepartment', loggedDepartment ?? '');
+    await prefs.setString('loggedDesignation', loggedDesignation ?? '');
+    await prefs.setString('loggedYear', loggedYear ?? '');
+    await prefs.setString('loggedSemester', loggedSemester ?? '');
+    await prefs.setString('loggedSection', loggedSection ?? '');
+    await prefs.setBool('isRegistrationPending', isRegistrationPending);
+  }
+
+  Future<void> loadSession() async {
+    final prefs = await SharedPreferences.getInstance();
+    bool? savedLoggedIn = prefs.getBool('isLoggedIn');
+    if (savedLoggedIn == true) {
+      isLoggedIn = true;
+      String? roleName = prefs.getString('currentUserRole');
+      if (roleName != null) {
+        currentUserRole = UserRole.values.firstWhere(
+          (e) => e.name == roleName,
+          orElse: () => UserRole.student,
+        );
+      }
+      loggedEmail = prefs.getString('loggedEmail');
+      loggedPhone = prefs.getString('loggedPhone');
+      loggedEnrollNo = prefs.getString('loggedEnrollNo');
+      loggedTeacherId = prefs.getString('loggedTeacherId');
+      loggedName = prefs.getString('loggedName');
+      loggedDepartment = prefs.getString('loggedDepartment');
+      loggedDesignation = prefs.getString('loggedDesignation');
+      loggedYear = prefs.getString('loggedYear');
+      loggedSemester = prefs.getString('loggedSemester');
+      loggedSection = prefs.getString('loggedSection');
+      isRegistrationPending = prefs.getBool('isRegistrationPending') ?? false;
+
+      notifyListeners();
+      loadAssignmentsFromSupabase();
+    }
+  }
+
+  Future<void> clearSession() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.clear();
+  }
 
   UserRole currentUserRole = UserRole.student;
   String? activeMeetingCode;
@@ -59,74 +121,52 @@ class AppData extends ChangeNotifier {
   String? loggedEnrollNo;
   String? loggedTeacherId;
   String? loggedName;
+  String? loggedDepartment;
+  String? loggedDesignation;
+  String? loggedYear;
+  String? loggedSemester;
+  String? loggedSection;
   bool isRegistrationPending = false;
+  List<Map<String, dynamic>> registeredStudents = [];
+  Map<String, Map<String, dynamic>> currentAssignmentStatuses =
+      {}; // student_id -> status_row
 
-  // Shared state
-  List<Map<String, dynamic>> classes = [
-    {
-      'id': 'c1',
-      'title': 'Bank: Finance & Strategy',
-      'subtitle': 'Prof. Albert',
-      'color': Colors.teal.shade500,
-      'progress': 0.88,
-      'time': '02:15:45',
-    },
-    {
-      'id': 'c2',
-      'title': 'Literature: Sonnets',
-      'subtitle': 'Prof. Shakespeare',
-      'color': Colors.indigo.shade400,
-      'progress': 0.85,
-      'time': '03:10:12',
-    },
-    {
-      'id': 'c3',
-      'title': 'Computer Science: Architecture',
-      'subtitle': 'Prof. Turing',
-      'color': Colors.deepOrange.shade400,
-      'progress': 0.60,
-      'time': '04:20:00',
-    },
-  ];
+  // Shared state (now dynamic based on department)
+  List<Map<String, dynamic>> classes = [];
 
   List<Map<String, dynamic>> get filteredClasses {
-    if (currentUserRole == UserRole.student) return classes;
-    if (loggedEmail == 'ptucsc@gmail.com') {
-      return classes
-          .where((c) => c['title'].contains('Computer Science'))
-          .toList();
-    }
-    if (loggedEmail == 'ptubanktech@gmail.com') {
-      return classes.where((c) => c['title'].contains('Bank')).toList();
-    }
-    return [];
+    if (!isLoggedIn) return [];
+
+    // Use the logged-in user's department to show their specific course
+    String? dept = loggedDepartment;
+    if (dept == null || dept.isEmpty) return [];
+
+    // Map departments to their brand colors for a premium look
+    Color courseColor = const Color(0xFF6C5CE7); // Default brand color
+    if (dept.toLowerCase().contains('computer') ||
+        dept.toLowerCase().contains('it'))
+      courseColor = Colors.deepOrange.shade400;
+    if (dept.toLowerCase().contains('bank') ||
+        dept.toLowerCase().contains('finance'))
+      courseColor = Colors.teal.shade500;
+    if (dept.toLowerCase().contains('literature'))
+      courseColor = Colors.indigo.shade400;
+
+    return [
+      {
+        'id': 'dept_${dept.replaceAll(' ', '_').toLowerCase()}',
+        'title': dept,
+        'subtitle': currentUserRole == UserRole.teacher
+            ? 'Prof. $loggedName'
+            : 'Subject Specialization',
+        'color': courseColor,
+        'progress': 0.50, // Default progress for visual effect
+        'time': '00:00:00',
+      },
+    ];
   }
 
-  Map<String, List<Map<String, dynamic>>> classAssignments = {
-    'c1': [
-      {
-        'id': 'a1',
-        'title': 'Financial Sector',
-        'dueDate': 'Oct 20',
-        'isDone': true,
-      },
-      {
-        'id': 'a2',
-        'title': 'Block Chain',
-        'dueDate': 'Oct 28',
-        'isDone': false,
-      },
-    ],
-    'c2': [
-      {
-        'id': 'a3',
-        'title': 'Analysis of Sonnet 18',
-        'dueDate': 'Oct 22',
-        'isDone': false,
-      },
-    ],
-    'c3': [],
-  };
+  Map<String, List<Map<String, dynamic>>> classAssignments = {};
 
   Map<String, List<PlatformFile>> assignmentSubmissions = {};
   Map<String, List<String>> assignmentComments = {};
@@ -134,8 +174,7 @@ class AppData extends ChangeNotifier {
   Map<String, Map<int, int>> mcqStudentAnswers = {};
   Map<String, int> assignmentSubmissionCounts = {};
   Map<String, int> assignmentUnsubmitCounts = {};
-  Map<String, bool> mcqFlagged =
-      {}; // Stores assignmentId -> whether flagged for cheating
+  Map<String, bool> mcqFlagged = {};
 
   void submitMcqQuiz(
     String assignmentId,
@@ -161,10 +200,9 @@ class AppData extends ChangeNotifier {
           _upsertAssignmentStatus(
             assignmentId: assignmentId,
             isDone: true,
-            isMissed: isMissed,
             isFlagged: isFlagged,
             score: score,
-            answers: answers,
+            isMcq: true,
           );
           return;
         }
@@ -175,31 +213,105 @@ class AppData extends ChangeNotifier {
   Future<void> _upsertAssignmentStatus({
     required String assignmentId,
     bool isDone = false,
-    bool isMissed = false,
     bool isFlagged = false,
-    int score = 0,
-    Map<int, int>? answers,
-    int? submissionCount,
-    int? unsubmitCount,
+    int? score,
+    bool isMcq = false,
   }) async {
     try {
-      final studentId = loggedPhone ?? loggedEmail ?? 'unknown';
-      await supabase.from('assignment_status').upsert({
-        'assignment_id': assignmentId,
-        'student_id': studentId,
-        'is_done': isDone,
-        'is_missed': isMissed,
-        'is_flagged': isFlagged,
-        'mcq_score': score,
-        'mcq_answers':
-            answers != null
-                ? answers.map((k, v) => MapEntry(k.toString(), v))
-                : null,
-        if (submissionCount != null) 'submission_count': submissionCount,
-        if (unsubmitCount != null) 'unsubmit_count': unsubmitCount,
-      }, onConflict: 'assignment_id,student_id');
+      final studentId =
+          loggedEnrollNo ?? loggedPhone ?? loggedEmail ?? 'unknown';
+      if (isMcq) {
+        await supabase.from('student_mcq_results').upsert({
+          'mcq_id': assignmentId,
+          'student_id': studentId,
+          'score': score ?? 0,
+          'is_completed': isDone,
+          'is_flagged': isFlagged,
+        }, onConflict: 'student_id, mcq_id');
+      } else {
+        String? fName;
+        final files = assignmentSubmissions[assignmentId];
+        if (files != null && files.isNotEmpty) {
+          final file = files.first;
+          fName = file.name;
+
+          // UPLOAD TO STORAGE
+          try {
+            final fileBytes = file.bytes;
+            if (fileBytes != null) {
+              final storagePath = '$assignmentId/$studentId/${file.name}';
+              await supabase.storage
+                  .from('student-submissions')
+                  .uploadBinary(
+                    storagePath,
+                    fileBytes,
+                    fileOptions: const FileOptions(upsert: true),
+                  );
+              debugPrint('Student file uploaded: $storagePath');
+            }
+          } catch (e) {
+            debugPrint('Student storage upload error: $e');
+          }
+        }
+        await supabase.from('student_assignment_responses').upsert({
+          'assignment_id': assignmentId,
+          'student_id': studentId,
+          'is_turned_in': isDone,
+          'submission_file_name': fName,
+        }, onConflict: 'student_id, assignment_id');
+      }
     } catch (e) {
       debugPrint('Supabase upsert status error: $e');
+    }
+  }
+
+  Future<void> fetchRegisteredStudents() async {
+    try {
+      final data = await supabase.from('student_registered_details').select();
+      registeredStudents = List<Map<String, dynamic>>.from(data);
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Error fetching students: $e');
+    }
+  }
+
+  Future<void> fetchAssignmentStatusesForTeacher(
+    String assignmentId, {
+    bool isMcq = false,
+  }) async {
+    try {
+      // Ensure students list is loaded first if empty
+      if (registeredStudents.isEmpty) {
+        final studentData = await supabase
+            .from('student_registered_details')
+            .select();
+        registeredStudents = List<Map<String, dynamic>>.from(studentData);
+      }
+
+      final tableName = isMcq
+          ? 'student_mcq_results'
+          : 'student_assignment_responses';
+      final idField = isMcq ? 'mcq_id' : 'assignment_id';
+
+      final data = await supabase
+          .from(tableName)
+          .select()
+          .eq(idField, assignmentId);
+
+      final Map<String, Map<String, dynamic>> statuses = {};
+      for (var row in data) {
+        // Universal mapping to keep UI happy
+        statuses[row['student_id'].toString()] = {
+          'is_done': isMcq ? row['is_completed'] : row['is_turned_in'],
+          'mcq_score': isMcq ? row['score'] : null,
+          'is_flagged': isMcq ? (row['is_flagged'] ?? false) : false,
+          'file_name': isMcq ? null : row['submission_file_name'],
+        };
+      }
+      currentAssignmentStatuses = statuses;
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Error fetching assignment statuses: $e');
     }
   }
 
@@ -241,40 +353,128 @@ class AppData extends ChangeNotifier {
           loggedTeacherId = teacherId;
           loggedName = registeredCheck['name'];
           loggedEmail = registeredCheck['email'];
+          // Convert numeric phone to string
+          loggedPhone = registeredCheck['phone']?.toString();
+          loggedDepartment = registeredCheck['department'];
+          loggedDesignation = registeredCheck['designation'];
+          saveSession();
           notifyListeners();
           loadAssignmentsFromSupabase();
+          debugPrint('Teacher Login Success: $teacherId');
           return true;
         } else {
-          debugPrint('Teacher password mismatch');
+          debugPrint('Teacher Login: Password mismatch for $teacherId');
           return false;
         }
       }
 
-      // Step 2: Check if in teacher_enrollments (initial registration)
-      final preCheck = await supabase
-          .from('teacher_enrollments')
-          .select()
-          .eq('teacher_id', teacherId)
-          .maybeSingle();
+      try {
+        final preCheck = await supabase
+            .from('teacher_int')
+            .select()
+            .eq('teacher_id', teacherId)
+            .maybeSingle();
 
-      if (preCheck != null) {
-        // Initial password for teachers also ptu@123
-        if (passwordInput == 'ptu@123') {
+        if (preCheck != null && passwordInput == 'ptu@123') {
           isRegistrationPending = true;
           currentUserRole = UserRole.teacher;
           loggedTeacherId = teacherId;
-          loggedName = preCheck['teacher_name'];
+          loggedName = preCheck['name'];
+          saveSession();
           notifyListeners();
+          debugPrint('Teacher Initial Login Success: $teacherId');
           return true;
-        } else {
-          debugPrint('Initial teacher password must be ptu@123');
-          return false;
         }
+      } catch (e) {
+        debugPrint(
+          'Step 2 loginTeacher skipped (likely teacher_int missing or error): $e',
+        );
+        // Continue to return false if both steps fail
       }
 
       return false;
     } catch (e) {
       debugPrint('Teacher login error: $e');
+      return false;
+    }
+  }
+
+  Future<bool> loginStudent(String enrollNo, String passwordInput) async {
+    try {
+      // Step 1: Check if this user is already registered in student_registered_details
+      var registeredCheck = await supabase
+          .from('student_registered_details')
+          .select()
+          .eq('enrollno', enrollNo)
+          .maybeSingle();
+
+      // Fallback: Check 'Enrollment No' column if 'enrollno' comes back empty
+      if (registeredCheck == null) {
+        registeredCheck = await supabase
+            .from('student_registered_details')
+            .select()
+            .eq('Enrollment No', int.tryParse(enrollNo) ?? -1)
+            .maybeSingle();
+      }
+
+      if (registeredCheck != null) {
+        // Already registered: Check if the password they typed matches their saved password
+        if (registeredCheck['password'] == passwordInput) {
+          isLoggedIn = true;
+          isRegistrationPending = false;
+          currentUserRole = UserRole.student;
+          loggedEnrollNo = enrollNo;
+          loggedName = registeredCheck['name']?.toString();
+          loggedPhone = registeredCheck['phone']?.toString();
+          loggedEmail = registeredCheck['email']?.toString();
+          loggedDepartment = registeredCheck['department']?.toString();
+          loggedYear = registeredCheck['year']?.toString();
+          loggedSemester = registeredCheck['semester']?.toString();
+          loggedSection = registeredCheck['section']?.toString();
+          saveSession();
+          notifyListeners();
+          loadAssignmentsFromSupabase();
+          return true;
+        } else {
+          debugPrint('Registered student password mismatch');
+          return false;
+        }
+      }
+
+      // Step 2: If not registered, it's their FIRST TIME. Check student_int.
+      var preCheck = await supabase
+          .from('student_int')
+          .select()
+          .eq('enrollno', enrollNo)
+          .maybeSingle();
+
+      // Fallback: Check 'Enrollment No' column if 'enrollno' comes back empty
+      if (preCheck == null) {
+        preCheck = await supabase
+            .from('student_int')
+            .select()
+            .eq('Enrollment No', int.tryParse(enrollNo) ?? -1)
+            .maybeSingle();
+      }
+
+      if (preCheck != null) {
+        // Initial password for all new students is 'ptu@123'
+        if (passwordInput == 'ptu@123') {
+          isRegistrationPending = true;
+          loggedEnrollNo = enrollNo;
+          loggedName = preCheck['name']?.toString();
+          saveSession();
+          notifyListeners();
+          return true;
+        } else {
+          debugPrint('Initial password must be ptu@123');
+          return false;
+        }
+      }
+
+      return false; // Not registered, not in initial list either
+    } catch (e) {
+      debugPrint('Student login error: $e');
       return false;
     }
   }
@@ -300,79 +500,18 @@ class AppData extends ChangeNotifier {
         'is_registered': true,
       });
 
-      isLoggedIn = true;
       isRegistrationPending = false;
-      currentUserRole = UserRole.teacher;
+      isLoggedIn = true;
       loggedTeacherId = teacherId;
       loggedName = name;
       loggedEmail = email;
+      loggedDepartment = department;
+      loggedDesignation = designation;
+      saveSession();
       notifyListeners();
-      loadAssignmentsFromSupabase();
       return null;
-    } on PostgrestException catch (e) {
-      debugPrint('Supabase teacher registration error: ${e.message}');
-      return e.message;
     } catch (e) {
-      debugPrint('Supabase teacher registration error: $e');
       return e.toString();
-    }
-  }
-
-  Future<bool> loginStudent(String enrollNo, String passwordInput) async {
-    try {
-      // Step 1: Check if this user is already registered in student_registered_details
-      final registeredCheck =
-          await supabase
-              .from('student_registered_details')
-              .select()
-              .eq('enrollno', enrollNo)
-              .maybeSingle();
-
-      if (registeredCheck != null) {
-        // Already registered: Check if the password they typed matches their saved password
-        if (registeredCheck['password'] == passwordInput) {
-          isLoggedIn = true;
-          isRegistrationPending = false;
-          currentUserRole = UserRole.student;
-          loggedEnrollNo = enrollNo;
-          loggedName = registeredCheck['name'];
-          loggedPhone = registeredCheck['phone'];
-          notifyListeners();
-          loadAssignmentsFromSupabase();
-          return true;
-        } else {
-          debugPrint('Registered student password mismatch');
-          return false;
-        }
-      }
-
-      // Step 2: If not registered, it's their FIRST TIME. Check student_int.
-      final preCheck =
-          await supabase
-              .from('student_int')
-              .select()
-              .eq('Enrollment No', int.tryParse(enrollNo) ?? -1)
-              .maybeSingle();
-
-      if (preCheck != null) {
-        // Initial password for all new students is 'ptu@123'
-        if (passwordInput == 'ptu@123') {
-          // Success: Initial Login successful
-          isRegistrationPending = true;
-          loggedEnrollNo = enrollNo;
-          loggedName = preCheck['name']; // Map to name from student_int
-          notifyListeners();
-          return true;
-        } else {
-          debugPrint('Initial password must be ptu@123');
-          return false;
-        }
-      }
-
-      return false; // Not registered, not in initial list either
-    } catch (e) {
-      debugPrint('Student login error: $e');
-      return false;
     }
   }
 
@@ -385,10 +524,10 @@ class AppData extends ChangeNotifier {
     required String year,
     required String semester,
     required String section,
+    required String email,
     required String password,
   }) async {
     try {
-      // Postgres expects YYYY-MM-DD, convert if format is DD/MM/YYYY or DD-MM-YYYY
       String sqlDob = dob;
       try {
         if (dob.contains('/')) {
@@ -416,6 +555,7 @@ class AppData extends ChangeNotifier {
         'year': year,
         'semester': semester,
         'section': section,
+        'email': email,
         'password': password,
         'is_registered': true,
       });
@@ -426,6 +566,13 @@ class AppData extends ChangeNotifier {
       loggedEnrollNo = enrollNo;
       loggedName = name;
       loggedPhone = phone;
+      loggedEmail = email;
+      loggedDepartment = department;
+      loggedYear = year;
+      loggedSemester = semester;
+      loggedSection = section;
+
+      saveSession();
       notifyListeners();
       loadAssignmentsFromSupabase();
       return null;
@@ -446,6 +593,12 @@ class AppData extends ChangeNotifier {
     loggedEnrollNo = null;
     loggedTeacherId = null;
     loggedName = null;
+    loggedDepartment = null;
+    loggedDesignation = null;
+    loggedYear = null;
+    loggedSemester = null;
+    loggedSection = null;
+    clearSession();
     notifyListeners();
   }
 
@@ -485,35 +638,48 @@ class AppData extends ChangeNotifier {
 
     // Persist to Supabase
     try {
-      String? filePath;
-      try {
-        if (file != null && file.bytes != null) {
-          final path = '$newId/${file.name}';
-          await supabase.storage.from('assignments').uploadBinary(
-            path,
-            file.bytes!,
-          );
-          filePath = file.name;
+      if (mcqData != null) {
+        await supabase.from('teacher_mcq_content').insert({
+          'id': newId,
+          'class_id': classId,
+          'title': title,
+          'due_datetime': dueDateTime?.toIso8601String(),
+          'start_datetime': startDateTime?.toIso8601String(),
+          'mcq_data': mcqData,
+          'time_per_question': timePerQuestion,
+        });
+      } else {
+        // UPLOAD TEACHER FILE IF EXISTS
+        if (file != null) {
+          try {
+            final fileBytes = file.bytes;
+            if (fileBytes != null) {
+              final storagePath = '$newId/${file.name}';
+              await supabase.storage
+                  .from('assignment-files')
+                  .uploadBinary(
+                    storagePath,
+                    fileBytes,
+                    fileOptions: const FileOptions(upsert: true),
+                  );
+              debugPrint('Teacher assignment file uploaded: $storagePath');
+            }
+          } catch (e) {
+            debugPrint('Teacher storage upload error: $e');
+          }
         }
-      } catch (e) {
-        debugPrint(
-          'File upload failed (check if "assignments" bucket exists): $e',
-        );
-      }
 
-      await supabase.from('assignments').insert({
-        'id': newId,
-        'class_id': classId,
-        'title': title,
-        'due_date': dueDate,
-        'due_datetime': dueDateTime?.toIso8601String(),
-        'start_datetime': startDateTime?.toIso8601String(),
-        'year': year,
-        'semester': semester,
-        'instructor_file_name': filePath,
-        'mcq_data': mcqData,
-        'time_per_question': timePerQuestion,
-      });
+        await supabase.from('teacher_assignment_content').insert({
+          'id': newId,
+          'class_id': classId,
+          'title': title,
+          'due_date': dueDate,
+          'due_datetime': dueDateTime?.toIso8601String(),
+          'instructor_file_name': file?.name,
+          'year': year,
+          'semester': semester,
+        });
+      }
     } catch (e) {
       debugPrint('Supabase addAssignment error: $e');
     }
@@ -522,63 +688,41 @@ class AppData extends ChangeNotifier {
   // Load assignments from Supabase and merge into local maps
   Future<void> loadAssignmentsFromSupabase() async {
     try {
-      final rows = await supabase.from('assignments').select();
-      for (final row in rows) {
-        final classId = row['class_id'] as String?;
-        if (classId == null) continue;
-        classAssignments.putIfAbsent(classId, () => []);
-        // Avoid duplicates
-        final exists = classAssignments[classId]!.any(
-          (a) => a['id'] == row['id'],
-        );
-        if (!exists) {
-          classAssignments[classId]!.insert(0, {
-            'id': row['id'],
-            'title': row['title'],
-            'dueDate': row['due_date'] ?? '',
-            'dueDateTime':
-                row['due_datetime'] != null
-                    ? DateTime.tryParse(row['due_datetime'])
-                    : null,
-            'startDateTime':
-                row['start_datetime'] != null
-                    ? DateTime.tryParse(row['start_datetime'])
-                    : null,
-            'year': row['year'] ?? 'All',
-            'semester': row['semester'] ?? 'All',
-            'instructorFileName': row['instructor_file_name'],
-            'mcqData': row['mcq_data'],
-            'timePerQuestion': row['time_per_question'] ?? 30,
-            'isDone': false,
-          });
-        }
+      fetchRegisteredStudents(); // Load students
+
+      // 1. Fetch MCQs
+      final mcqRows = await supabase.from('teacher_mcq_content').select();
+      for (final row in mcqRows) {
+        _processAssignmentRow(row, isMcq: true);
       }
 
-      // Load student statuses
-      final studentId = loggedPhone ?? loggedEmail;
+      // 2. Fetch Assignments
+      final assRows = await supabase
+          .from('teacher_assignment_content')
+          .select();
+      for (final row in assRows) {
+        _processAssignmentRow(row, isMcq: false);
+      }
+
+      // 3. Load Student Statuses (Current student ONLY)
+      final studentId = loggedEnrollNo ?? loggedPhone ?? loggedEmail;
       if (studentId != null) {
-        final statuses = await supabase
-            .from('assignment_status')
+        // Load MCQ Results
+        final mcqResults = await supabase
+            .from('student_mcq_results')
             .select()
             .eq('student_id', studentId);
-        for (final s in statuses) {
-          final aId = s['assignment_id'] as String;
-          if (s['is_done'] == true) {
-            for (var list in classAssignments.values) {
-              for (var a in list) {
-                if (a['id'] == aId) {
-                  a['isDone'] = true;
-                  a['isMissed'] = s['is_missed'] ?? false;
-                }
-              }
-            }
-          }
-          if (s['mcq_score'] != null) mcqScores[aId] = s['mcq_score'];
-          if (s['is_flagged'] == true) mcqFlagged[aId] = true;
-          if (s['submission_count'] != null)
-            assignmentSubmissionCounts[aId] = s['submission_count'];
-          if (s['unsubmit_count'] != null)
-            assignmentUnsubmitCounts[aId] = s['unsubmit_count'];
+        for (final r in mcqResults) {
+          _updateLocalStatus(r['mcq_id'], r, isMcq: true);
+        }
+
+        // Load Assignment Results
+        final assResults = await supabase
+            .from('student_assignment_responses')
+            .select()
+            .eq('student_id', studentId);
+        for (final r in assResults) {
+          _updateLocalStatus(r['assignment_id'], r, isMcq: false);
         }
       }
       notifyListeners();
@@ -587,7 +731,57 @@ class AppData extends ChangeNotifier {
     }
   }
 
-  Future<void> toggleTurnIn(String assignmentId) async {
+  void _processAssignmentRow(Map<String, dynamic> row, {required bool isMcq}) {
+    final classId = row['class_id'] as String?;
+    if (classId == null) return;
+    classAssignments.putIfAbsent(classId, () => []);
+
+    // Avoid duplicates
+    if (!classAssignments[classId]!.any((a) => a['id'] == row['id'])) {
+      classAssignments[classId]!.insert(0, {
+        'id': row['id'],
+        'title': row['title'],
+        'dueDate': row['due_date'] ?? '',
+        'dueDateTime': row['due_datetime'] != null
+            ? DateTime.tryParse(row['due_datetime'])
+            : null,
+        'startDateTime': row['start_datetime'] != null
+            ? DateTime.tryParse(row['start_datetime'])
+            : null,
+        'year': row['year'] ?? 'All',
+        'semester': row['semester'] ?? 'All',
+        'instructorFileName': row['instructor_file_name'],
+        'mcqData': row['mcq_data'],
+        'timePerQuestion': row['time_per_question'] ?? 30,
+        'isDone': false,
+      });
+    }
+  }
+
+  void _updateLocalStatus(
+    String aId,
+    Map<String, dynamic> status, {
+    required bool isMcq,
+  }) {
+    bool done = isMcq
+        ? (status['is_completed'] == true)
+        : (status['is_turned_in'] == true);
+    if (!done) return;
+
+    for (var list in classAssignments.values) {
+      for (var a in list) {
+        if (a['id'] == aId) {
+          a['isDone'] = true;
+          if (isMcq) {
+            mcqScores[aId] = status['score'];
+            mcqFlagged[aId] = status['is_flagged'] ?? false;
+          }
+        }
+      }
+    }
+  }
+
+  void toggleTurnIn(String assignmentId) {
     for (var list in classAssignments.values) {
       for (var a in list) {
         if (a['id'] == assignmentId) {
@@ -596,40 +790,26 @@ class AppData extends ChangeNotifier {
             // Trying to Submit
             int submitCount = assignmentSubmissionCounts[assignmentId] ?? 0;
             if (submitCount >= 2) return; // Block further submissions
-
-            // Real Upload to Supabase Storage
-            final studentId = loggedPhone ?? loggedEmail ?? 'unknown';
-            final files = assignmentSubmissions[assignmentId];
-            String? uploadedFileName;
-
-            if (files != null && files.isNotEmpty) {
-              final file = files.first;
-              if (file.bytes != null) {
-                final path = '$assignmentId/$studentId/${file.name}';
-                await supabase.storage.from('submissions').uploadBinary(
-                  path,
-                  file.bytes!,
-                );
-                uploadedFileName = file.name;
-              }
-            }
-
-            // Update Database
-            await supabase.from('assignment_status').upsert({
-              'assignment_id': assignmentId,
-              'student_id': studentId,
-              'is_done': true,
-              'submission_file_name': uploadedFileName,
-              'submission_count': submitCount + 1,
-            });
-
             assignmentSubmissionCounts[assignmentId] = submitCount + 1;
           } else {
-            // Trying to Unsubmit
-            // ... (optional: delete file from storage)
+            // Trying to Unsubmit (Undone)
+            int unsubmitCount = assignmentUnsubmitCounts[assignmentId] ?? 0;
+            if (unsubmitCount >= 1)
+              return; // Block if already used the one undo chance
+            assignmentUnsubmitCounts[assignmentId] = unsubmitCount + 1;
+            assignmentSubmissions.remove(
+              assignmentId,
+            ); // Clear old files on undone
           }
           a['isDone'] = !a['isDone'];
           notifyListeners();
+
+          // Persist to Supabase
+          _upsertAssignmentStatus(
+            assignmentId: assignmentId,
+            isDone: a['isDone'] == true,
+            isMcq: a['mcqData'] != null,
+          );
           return;
         }
       }
@@ -641,8 +821,21 @@ class AppData extends ChangeNotifier {
     // and replace any existing submissions per the 'one file' rule.
     if (files.isNotEmpty) {
       assignmentSubmissions[assignmentId] = [files.first];
+      notifyListeners();
+
+      // Persist to Supabase if already turned in
+      for (var list in classAssignments.values) {
+        for (var a in list) {
+          if (a['id'] == assignmentId && (a['isDone'] ?? false)) {
+            _upsertAssignmentStatus(
+              assignmentId: assignmentId,
+              isDone: true,
+              isMcq: a['mcqData'] != null,
+            );
+          }
+        }
+      }
     }
-    notifyListeners();
   }
 
   void removeFile(String assignmentId, int index) {
@@ -668,7 +861,14 @@ class AppData extends ChangeNotifier {
     notifyListeners();
     // Delete from Supabase
     try {
-      await supabase.from('assignments').delete().eq('id', assignmentId);
+      await supabase
+          .from('teacher_mcq_content')
+          .delete()
+          .eq('id', assignmentId);
+      await supabase
+          .from('teacher_assignment_content')
+          .delete()
+          .eq('id', assignmentId);
     } catch (e) {
       debugPrint('Supabase deleteAssignment error: $e');
     }
@@ -704,9 +904,9 @@ class PTU_PORTALApp extends StatelessWidget {
           home: AppData().isLoggedIn
               ? const MainLayoutScreen()
               : (AppData().isRegistrationPending
-                    ? (AppData().currentUserRole == UserRole.teacher 
-                        ? const TeacherRegistrationScreen() 
-                        : const StudentRegistrationScreen())
+                    ? (AppData().currentUserRole == UserRole.teacher
+                          ? const TeacherRegistrationScreen()
+                          : const StudentRegistrationScreen())
                     : const LoginScreen()),
         );
       },
@@ -804,6 +1004,11 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
                         NavPage.assignments,
                       ),
                       _buildNavItem(Icons.quiz_rounded, 'MCQs', NavPage.mcq),
+                      _buildNavItem(
+                        Icons.person_rounded,
+                        'Profile',
+                        NavPage.profile,
+                      ),
                     ],
                   ),
                 ),
@@ -856,29 +1061,7 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
                   ),
                   child: Row(
                     children: [
-                      Expanded(
-                        child: Container(
-                          height: 44,
-                          decoration: BoxDecoration(
-                            color: Colors.grey.shade100,
-                            borderRadius: BorderRadius.circular(22),
-                          ),
-                          child: const TextField(
-                            decoration: InputDecoration(
-                              hintText: 'Search for courses, assignments...',
-                              prefixIcon: Icon(
-                                Icons.search,
-                                color: Colors.grey,
-                              ),
-                              border: InputBorder.none,
-                              contentPadding: EdgeInsets.symmetric(
-                                horizontal: 20,
-                                vertical: 12,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
+                      const Spacer(),
                       const SizedBox(width: 24),
                       Container(
                         padding: const EdgeInsets.symmetric(
@@ -931,26 +1114,23 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
 
   Widget _buildUserInfo() {
     UserRole role = AppData().currentUserRole;
-    String name =
-        role == UserRole.teacher
-            ? (AppData().loggedEmail ?? 'Teacher')
-            : (AppData().loggedName ?? AppData().loggedPhone ?? 'Student');
+    String name = role == UserRole.teacher
+        ? (AppData().loggedEmail ?? 'Teacher')
+        : (AppData().loggedName ?? AppData().loggedPhone ?? 'Student');
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24.0),
       child: Row(
         children: [
           CircleAvatar(
             radius: 20,
-            backgroundColor:
-                role == UserRole.teacher
-                    ? Colors.amber.shade100
-                    : Colors.blue.shade100,
+            backgroundColor: role == UserRole.teacher
+                ? Colors.amber.shade100
+                : Colors.blue.shade100,
             child: Icon(
               role == UserRole.teacher ? Icons.person_4 : Icons.face,
-              color:
-                  role == UserRole.teacher
-                      ? Colors.amber.shade800
-                      : Colors.blue.shade800,
+              color: role == UserRole.teacher
+                  ? Colors.amber.shade800
+                  : Colors.blue.shade800,
             ),
           ),
           const SizedBox(width: 12),
@@ -987,10 +1167,9 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
       child: ListTile(
         onTap: () => setState(() => _currentPage = page),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        tileColor:
-            isSelected
-                ? const Color(0xFF6C5CE7).withAlpha(20)
-                : Colors.transparent,
+        tileColor: isSelected
+            ? const Color(0xFF6C5CE7).withAlpha(20)
+            : Colors.transparent,
         leading: Icon(
           icon,
           color: isSelected ? const Color(0xFF6C5CE7) : Colors.grey.shade500,
@@ -1019,6 +1198,8 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
         return const AssignmentsView();
       case NavPage.mcq:
         return const McqCentralView();
+      case NavPage.profile:
+        return const ProfileView();
     }
   }
 }
@@ -1031,7 +1212,6 @@ class McqCentralView extends StatefulWidget {
 }
 
 class _McqCentralViewState extends State<McqCentralView> {
-
   @override
   Widget build(BuildContext context) {
     bool isTeacher = AppData().currentUserRole == UserRole.teacher;
@@ -1064,132 +1244,137 @@ class _McqCentralViewState extends State<McqCentralView> {
                   ),
                 ),
                 if (isTeacher)
-                  const Text(
-                    'Review and grade tests below',
-                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  ElevatedButton.icon(
+                    onPressed: () => _openCreateMcqTestDialog(context),
+                    icon: const Icon(Icons.add),
+                    label: const Text('Upload New MCQ JSON Test'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF6C5CE7),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 24,
+                        vertical: 16,
+                      ),
+                    ),
                   ),
               ],
             ),
             const SizedBox(height: 32),
             Expanded(
-              child:
-                  allMcqTests.isEmpty
-                      ? const Center(
-                        child: Text(
-                          'No MCQ Tests available.',
-                          style: TextStyle(color: Colors.grey, fontSize: 16),
-                        ),
-                      )
-                      : ListView.builder(
-                        itemCount: allMcqTests.length,
-                        itemBuilder: (ctx, i) {
-                          var item = allMcqTests[i];
-                          var cls = item['classData'];
-                          var a = item['assignment'];
+              child: allMcqTests.isEmpty
+                  ? const Center(
+                      child: Text(
+                        'No MCQ Tests available.',
+                        style: TextStyle(color: Colors.grey, fontSize: 16),
+                      ),
+                    )
+                  : ListView.builder(
+                      itemCount: allMcqTests.length,
+                      itemBuilder: (ctx, i) {
+                        var item = allMcqTests[i];
+                        var cls = item['classData'];
+                        var a = item['assignment'];
 
-                          return Card(
-                            margin: const EdgeInsets.only(bottom: 16),
-                            elevation: 0,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(16),
-                              side: BorderSide(color: Colors.grey.shade200),
-                            ),
-                            child: InkWell(
-                              borderRadius: BorderRadius.circular(16),
-                              onTap: () {
-                                Navigator.push(
-                                  context,
-                                  MaterialPageRoute(
-                                    builder:
-                                        (_) => AssignmentInteractionScreen(
-                                          assignment: a,
-                                          classColor: cls['color'],
-                                        ),
+                        return Card(
+                          margin: const EdgeInsets.only(bottom: 16),
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16),
+                            side: BorderSide(color: Colors.grey.shade200),
+                          ),
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(16),
+                            onTap: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => AssignmentInteractionScreen(
+                                    assignment: a,
+                                    classColor: cls['color'],
                                   ),
-                                );
-                              },
-                              child: Padding(
-                                padding: const EdgeInsets.all(24.0),
-                                child: Row(
-                                  children: [
-                                    CircleAvatar(
-                                      radius: 24,
-                                      backgroundColor: cls['color'].withAlpha(
-                                        20,
-                                      ),
-                                      child: Icon(
-                                        Icons.quiz,
-                                        color: cls['color'],
-                                      ),
+                                ),
+                              );
+                            },
+                            child: Padding(
+                              padding: const EdgeInsets.all(24.0),
+                              child: Row(
+                                children: [
+                                  CircleAvatar(
+                                    radius: 24,
+                                    backgroundColor: cls['color'].withAlpha(20),
+                                    child: Icon(
+                                      Icons.quiz,
+                                      color: cls['color'],
                                     ),
-                                    const SizedBox(width: 24),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            a['title'],
-                                            style: const TextStyle(
-                                              fontSize: 18,
-                                              fontWeight: FontWeight.bold,
-                                            ),
+                                  ),
+                                  const SizedBox(width: 24),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          a['title'],
+                                          style: const TextStyle(
+                                            fontSize: 18,
+                                            fontWeight: FontWeight.bold,
                                           ),
-                                          const SizedBox(height: 4),
-                                          Text(
-                                            '${cls['title']}\nStart: ${a['startDateTime']?.toString().substring(0, 16) ?? 'N/A'}  •  End: ${a['dueDateTime']?.toString().substring(0, 16) ?? a['dueDate']}  •  ${a['mcqData'].length} Questions',
-                                            style: TextStyle(
-                                              color: Colors.grey.shade600,
-                                            ),
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          '${cls['title']}\nStart: ${a['startDateTime']?.toString().substring(0, 16) ?? 'N/A'}  •  End: ${a['dueDateTime']?.toString().substring(0, 16) ?? a['dueDate']}  •  ${a['mcqData'].length} Questions',
+                                          style: TextStyle(
+                                            color: Colors.grey.shade600,
                                           ),
-                                        ],
-                                      ),
+                                        ),
+                                      ],
                                     ),
-                                    if (isTeacher)
-                                      Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          const Text(
-                                            '0/25 Submitted',
-                                            style: TextStyle(
-                                              color: Color(0xFF6C5CE7),
-                                              fontWeight: FontWeight.w600,
-                                            ),
+                                  ),
+                                  if (isTeacher)
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          '${AppData().registeredStudents.length} Assigned',
+                                          style: const TextStyle(
+                                            color: Color(0xFF6C5CE7),
+                                            fontWeight: FontWeight.w600,
                                           ),
-                                          const SizedBox(width: 12),
-                                          IconButton(
-                                            icon: const Icon(
-                                              Icons.delete_outline,
-                                              color: Colors.red,
-                                            ),
-                                            tooltip: 'Delete Test',
-                                            onPressed: () {
-                                              _showDeleteConfirmation(
-                                                context,
-                                                cls['id'],
-                                                a['id'],
-                                              );
-                                            },
+                                        ),
+                                        const SizedBox(width: 12),
+                                        IconButton(
+                                          icon: const Icon(
+                                            Icons.delete_outline,
+                                            color: Colors.red,
                                           ),
-                                        ],
-                                      )
-                                    else
-                                      a['isDone']
-                                          ? const Icon(
+                                          tooltip: 'Delete Test',
+                                          onPressed: () {
+                                            _showDeleteConfirmation(
+                                              context,
+                                              cls['id'],
+                                              a['id'],
+                                            );
+                                          },
+                                        ),
+                                      ],
+                                    )
+                                  else
+                                    a['isDone']
+                                        ? const Icon(
                                             Icons.check_circle,
                                             color: Colors.green,
                                           )
-                                          : const Icon(
+                                        : const Icon(
                                             Icons.pending_actions,
                                             color: Colors.orange,
                                           ),
-                                  ],
-                                ),
+                                ],
                               ),
                             ),
-                          );
-                        },
-                      ),
+                          ),
+                        );
+                      },
+                    ),
             ),
           ],
         ),
@@ -1204,251 +1389,625 @@ class _McqCentralViewState extends State<McqCentralView> {
   ) {
     showDialog(
       context: context,
-      builder:
-          (ctx) => AlertDialog(
-            title: const Text('Confirm Delete'),
-            content: const Text(
-              'Are you sure you want to delete this test? This action cannot be undone.',
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Cancel'),
-              ),
-              TextButton(
-                onPressed: () {
-                  AppData().deleteAssignment(classId, assignmentId);
-                  Navigator.pop(ctx);
-                  setState(() {});
-                },
-                style: TextButton.styleFrom(foregroundColor: Colors.red),
-                child: const Text('Delete'),
-              ),
-            ],
+      builder: (ctx) => AlertDialog(
+        title: const Text('Confirm Delete'),
+        content: const Text(
+          'Are you sure you want to delete this test? This action cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
           ),
+          TextButton(
+            onPressed: () {
+              AppData().deleteAssignment(classId, assignmentId);
+              Navigator.pop(ctx);
+              setState(() {});
+            },
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
     );
   }
 
-  }
+  void _openCreateMcqTestDialog(BuildContext context) {
+    TextEditingController titleCtrl = TextEditingController();
+    TextEditingController timeCtrl = TextEditingController(text: '30');
+    DateTime startDateTime = DateTime.now();
+    DateTime endDateTime = DateTime.now().add(const Duration(minutes: 30));
+    String? selectedClassId = AppData().filteredClasses.isNotEmpty
+        ? AppData().filteredClasses.first['id']
+        : null;
+    List<dynamic>? mcqData;
 
-void _openCreateMcqTestDialog(BuildContext context, String classId, {VoidCallback? onRefresh}) {
-  TextEditingController titleCtrl = TextEditingController();
-  TextEditingController timeCtrl = TextEditingController(text: '30');
-  DateTime startDateTime = DateTime.now();
-  DateTime endDateTime = DateTime.now().add(const Duration(minutes: 30));
-  List<dynamic>? mcqData;
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            int qCount = mcqData?.length ?? 0;
+            int timePerQ = int.tryParse(timeCtrl.text) ?? 30;
+            int totalSeconds = qCount * timePerQ;
+            String totalTimeStr =
+                '${totalSeconds ~/ 60}m ${totalSeconds % 60}s';
 
-  showDialog(
-    context: context,
-    builder: (ctx) {
-      return StatefulBuilder(
-        builder: (ctx, setDialogState) {
-          int qCount = mcqData?.length ?? 0;
-          int timePerQ = int.tryParse(timeCtrl.text) ?? 30;
-          int totalSeconds = qCount * timePerQ;
-          String totalTimeStr =
-              '${totalSeconds ~/ 60}m ${totalSeconds % 60}s';
-
-          return AlertDialog(
-            title: const Text('Upload MCQ JSON Test'),
-            content: SizedBox(
-              width: 400,
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Center(
-                      child: Text(
-                        'Creating Test for: ${AppData().classes.firstWhere((c) => c['id'] == classId)['title']}',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF6C5CE7),
+            return AlertDialog(
+              title: const Text('Upload MCQ JSON Test'),
+              content: SizedBox(
+                width: 400,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      TextField(
+                        controller: titleCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'MCQ Test Title',
+                          border: OutlineInputBorder(),
                         ),
                       ),
-                    ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: titleCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'MCQ Test Title',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    ListTile(
-                      shape: RoundedRectangleBorder(
-                        side: BorderSide(color: Colors.grey.shade400),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      title: Text(
-                        'Start: ${startDateTime.toString().substring(0, 16)}',
-                      ),
-                      trailing: const Icon(Icons.calendar_month),
-                      onTap: () async {
-                        DateTime? date = await showDatePicker(
-                          context: ctx,
-                          initialDate: startDateTime,
-                          firstDate: DateTime.now(),
-                          lastDate: DateTime(2030),
-                        );
-                        if (date != null) {
-                          TimeOfDay? time = await showTimePicker(
+                      const SizedBox(height: 16),
+                      ListTile(
+                        shape: RoundedRectangleBorder(
+                          side: BorderSide(color: Colors.grey.shade400),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        title: Text(
+                          'Start: ${_formatDateTime12h(startDateTime)}',
+                        ),
+                        trailing: const Icon(Icons.calendar_month),
+                        onTap: () async {
+                          DateTime? date = await showDatePicker(
                             context: ctx,
-                            initialTime: TimeOfDay.fromDateTime(
-                              startDateTime,
-                            ),
+                            initialDate: startDateTime,
+                            firstDate: DateTime.now(),
+                            lastDate: DateTime(2030),
                           );
-                          if (time != null) {
-                            setDialogState(() {
-                              startDateTime = DateTime(
-                                date.year,
-                                date.month,
-                                date.day,
-                                time.hour,
-                                time.minute,
-                              );
-                            });
-                          }
-                        }
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    ListTile(
-                      shape: RoundedRectangleBorder(
-                        side: BorderSide(color: Colors.grey.shade400),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      title: Text('End: ${endDateTime.toString().substring(0, 16)}'),
-                      trailing: const Icon(Icons.calendar_month),
-                      onTap: () async {
-                        DateTime? date = await showDatePicker(
-                          context: ctx,
-                          initialDate: endDateTime,
-                          firstDate: startDateTime,
-                          lastDate: DateTime(2030),
-                        );
-                        if (date != null) {
-                          TimeOfDay? time = await showTimePicker(
-                            context: ctx,
-                            initialTime: TimeOfDay.fromDateTime(endDateTime),
-                          );
-                          if (time != null) {
-                            setDialogState(() {
-                              endDateTime = DateTime(
-                                date.year,
-                                date.month,
-                                date.day,
-                                time.hour,
-                                time.minute,
-                              );
-                            });
-                          }
-                        }
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: timeCtrl,
-                      decoration: InputDecoration(
-                        labelText: 'Time per question (seconds)',
-                        border: const OutlineInputBorder(),
-                        helperText: 'Total Test Time: $totalTimeStr',
-                      ),
-                      keyboardType: TextInputType.number,
-                      onChanged: (val) => setDialogState(() {}),
-                    ),
-                    const SizedBox(height: 16),
-                    OutlinedButton.icon(
-                      onPressed: () async {
-                        var res = await FilePicker.platform.pickFiles(
-                          type: FileType.custom,
-                          allowedExtensions: ['json'],
-                          withData: true,
-                        );
-                        if (res != null && res.files.first.bytes != null) {
-                          try {
-                            final data = jsonDecode(
-                              utf8.decode(res.files.first.bytes!),
+                          if (date != null) {
+                            TimeOfDay? time = await showTimePicker(
+                              context: ctx,
+                              initialTime: TimeOfDay.fromDateTime(
+                                startDateTime,
+                              ),
                             );
-                            if (data is List) {
-                              setDialogState(() => mcqData = data);
+                            if (time != null) {
+                              setDialogState(() {
+                                startDateTime = DateTime(
+                                  date.year,
+                                  date.month,
+                                  date.day,
+                                  time.hour,
+                                  time.minute,
+                                );
+                              });
                             }
-                          } catch (e) {
-                            debugPrint('Error parsing MCQ JSON: $e');
                           }
-                        }
-                      },
-                      icon: const Icon(Icons.file_upload),
-                      label: Text(
-                        mcqData != null
-                            ? 'MCQ Test Attached (${mcqData!.length} Qs)'
-                            : 'Upload JSON File',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                        },
                       ),
+                      const SizedBox(height: 16),
+                      ListTile(
+                        shape: RoundedRectangleBorder(
+                          side: BorderSide(color: Colors.grey.shade400),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        title: Text('End: ${_formatDateTime12h(endDateTime)}'),
+                        trailing: const Icon(Icons.calendar_month),
+                        onTap: () async {
+                          DateTime? date = await showDatePicker(
+                            context: ctx,
+                            initialDate: endDateTime,
+                            firstDate: startDateTime,
+                            lastDate: DateTime(2030),
+                          );
+                          if (date != null) {
+                            TimeOfDay? time = await showTimePicker(
+                              context: ctx,
+                              initialTime: TimeOfDay.fromDateTime(endDateTime),
+                            );
+                            if (time != null) {
+                              setDialogState(() {
+                                endDateTime = DateTime(
+                                  date.year,
+                                  date.month,
+                                  date.day,
+                                  time.hour,
+                                  time.minute,
+                                );
+                              });
+                            }
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: timeCtrl,
+                        decoration: InputDecoration(
+                          labelText: 'Time per question (seconds)',
+                          border: const OutlineInputBorder(),
+                          helperText: 'Total Test Time: $totalTimeStr',
+                        ),
+                        keyboardType: TextInputType.number,
+                        onChanged: (val) => setDialogState(() {}),
+                      ),
+                      const SizedBox(height: 16),
+                      OutlinedButton.icon(
+                        onPressed: () async {
+                          var res = await FilePicker.platform.pickFiles(
+                            type: FileType.custom,
+                            allowedExtensions: ['json'],
+                            withData: true,
+                          );
+                          if (res != null && res.files.first.bytes != null) {
+                            try {
+                              final data = jsonDecode(
+                                utf8.decode(res.files.first.bytes!),
+                              );
+                              if (data is List) {
+                                setDialogState(() => mcqData = data);
+                              }
+                            } catch (e) {
+                              debugPrint('MCQ JSON Error: $e');
+                            }
+                          }
+                        },
+                        icon: const Icon(Icons.upload_file),
+                        label: Text(
+                          mcqData != null
+                              ? 'JSON Selected (${mcqData!.length} Qs)'
+                              : 'Select MCQ JSON File',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        'Note: JSON file should be an array of questions with 4 options each and an answerIndex.',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey.shade600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    if (titleCtrl.text.isNotEmpty &&
+                        selectedClassId != null &&
+                        mcqData != null) {
+                      int qCount = mcqData?.length ?? 0;
+                      int timePerQ = int.tryParse(timeCtrl.text) ?? 30;
+                      int totalSeconds = qCount * timePerQ;
+                      if (endDateTime.difference(startDateTime).inSeconds <
+                          totalSeconds) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              'Warning: The time window between Start and End (${endDateTime.difference(startDateTime).inSeconds}s) is smaller than the required total test time (${totalSeconds}s). Please adjust.',
+                            ),
+                          ),
+                        );
+                        return;
+                      }
+                      AppData().addAssignment(
+                        selectedClassId!,
+                        titleCtrl.text,
+                        endDateTime.toString().substring(0, 16),
+                        mcqData: mcqData,
+                        timePerQuestion: timePerQ,
+                        startDateTime: startDateTime,
+                        dueDateTime: endDateTime,
+                      );
+                      Navigator.pop(ctx);
+                      setState(() {}); // refresh global list
+                    }
+                  },
+
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF6C5CE7),
+                    foregroundColor: Colors.white,
+                  ),
+                  child: const Text('Create Test'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+// ---------------------------------------------------------
+// Profile View (Highly detailed and stunning)
+// ---------------------------------------------------------
+class ProfileView extends StatelessWidget {
+  const ProfileView({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final role = AppData().currentUserRole;
+    final isTeacher = role == UserRole.teacher;
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(40),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildProfileHeader(context, isTeacher),
+          const SizedBox(height: 32),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                flex: 2,
+                child: Column(
+                  children: [
+                    _buildInfoCard(
+                      'Personal Information',
+                      Icons.person_outline,
+                      [
+                        _buildInfoRow(
+                          'Full Name',
+                          AppData().loggedName ?? 'N/A',
+                        ),
+                        _buildInfoRow(
+                          'Email Address',
+                          AppData().loggedEmail ?? 'N/A',
+                        ),
+                        _buildInfoRow(
+                          'Phone Number',
+                          AppData().loggedPhone ?? 'N/A',
+                        ),
+                        if (!isTeacher)
+                          _buildInfoRow(
+                            'Registration No',
+                            AppData().loggedEnrollNo ?? 'N/A',
+                          ),
+                        if (isTeacher)
+                          _buildInfoRow(
+                            'Teacher ID',
+                            AppData().loggedTeacherId ?? 'N/A',
+                          ),
+                      ],
                     ),
-                    const SizedBox(height: 12),
-                    Text(
-                      'Note: JSON file should be an array of questions with 4 options each and an answerIndex.',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.grey.shade600,
-                      ),
+                    const SizedBox(height: 24),
+                    _buildInfoCard(
+                      isTeacher ? 'Professional Details' : 'Academic Details',
+                      isTeacher ? Icons.work_outline : Icons.school_outlined,
+                      isTeacher
+                          ? [
+                              _buildInfoRow(
+                                'Department',
+                                AppData().loggedDepartment ?? 'N/A',
+                              ),
+                              _buildInfoRow(
+                                'Designation',
+                                AppData().loggedDesignation ?? 'N/A',
+                              ),
+                              _buildInfoRow(
+                                'Specialization',
+                                'Cloud Computing & AI',
+                              ),
+                            ]
+                          : [
+                              _buildInfoRow(
+                                'Department',
+                                AppData().loggedDepartment ?? 'N/A',
+                              ),
+                              _buildInfoRow(
+                                'Year / Semester',
+                                '${AppData().loggedYear ?? 'N/A'} / ${AppData().loggedSemester ?? 'N/A'}',
+                              ),
+                              _buildInfoRow(
+                                'Section',
+                                AppData().loggedSection ?? 'N/A',
+                              ),
+                            ],
                     ),
                   ],
                 ),
               ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Cancel'),
-              ),
-              ElevatedButton(
-                onPressed: () {
-                  if (titleCtrl.text.isNotEmpty &&
-                      mcqData != null) {
-                    int qCount = mcqData?.length ?? 0;
-                    int timePerQ = int.tryParse(timeCtrl.text) ?? 30;
-                    int totalSeconds = qCount * timePerQ;
-                    if (endDateTime.difference(startDateTime).inSeconds <
-                        totalSeconds) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(
-                            'Warning: The time window between Start and End (${endDateTime.difference(startDateTime).inSeconds}s) is smaller than the required total test time (${totalSeconds}s). Please adjust.',
-                          ),
-                        ),
-                      );
-                      return;
-                    }
-                    AppData().addAssignment(
-                      classId,
-                      titleCtrl.text,
-                      endDateTime.toString().substring(0, 16),
-                      mcqData: mcqData,
-                      timePerQuestion: timePerQ,
-                      startDateTime: startDateTime,
-                      dueDateTime: endDateTime,
-                    );
-                    Navigator.pop(ctx);
-                    if (onRefresh != null) onRefresh();
-                  }
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF6C5CE7),
-                  foregroundColor: Colors.white,
+              const SizedBox(width: 32),
+              Expanded(
+                flex: 1,
+                child: Column(
+                  children: [
+                    _buildAccountStatusCard(),
+                    const SizedBox(height: 24),
+                    _buildQuickActionsCard(context),
+                  ],
                 ),
-                child: const Text('Create Test'),
               ),
             ],
-          );
-        },
-      );
-    },
-  );
-}
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildProfileHeader(BuildContext context, bool isTeacher) {
+    return Container(
+      padding: const EdgeInsets.all(32),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            const Color(0xFF6C5CE7),
+            const Color(0xFF6C5CE7).withBlue(255).withGreen(150),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF6C5CE7).withAlpha(60),
+            blurRadius: 30,
+            offset: const Offset(0, 15),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Stack(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(4),
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  shape: BoxShape.circle,
+                ),
+                child: CircleAvatar(
+                  radius: 60,
+                  backgroundColor: Colors.white,
+                  child: Hero(
+                    tag: 'profile_avatar',
+                    child: Icon(
+                      isTeacher ? Icons.person_4 : Icons.face,
+                      size: 70,
+                      color: const Color(0xFF6C5CE7),
+                    ),
+                  ),
+                ),
+              ),
+              Positioned(
+                bottom: 5,
+                right: 5,
+                child: Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: const BoxDecoration(
+                    color: Colors.green,
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.check, color: Colors.white, size: 16),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(width: 32),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  AppData().loggedName ?? 'Guest User',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 32,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withAlpha(50),
+                        borderRadius: BorderRadius.circular(30),
+                      ),
+                      child: Text(
+                        isTeacher ? 'Senior Faculty' : 'Undergraduate Student',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Text(
+                      'ID: ${isTeacher ? AppData().loggedTeacherId : AppData().loggedEnrollNo}',
+                      style: TextStyle(
+                        color: Colors.white.withAlpha(200),
+                        fontSize: 14,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          ElevatedButton.icon(
+            onPressed: () {},
+            icon: const Icon(Icons.edit_outlined, size: 18),
+            label: const Text('Edit Profile'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.white,
+              foregroundColor: const Color(0xFF6C5CE7),
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 18),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInfoCard(String title, IconData icon, List<Widget> children) {
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.grey.shade100),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, color: const Color(0xFF6C5CE7), size: 24),
+              const SizedBox(width: 12),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 24),
+          ...children,
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInfoRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16.0),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              color: Colors.grey.shade500,
+              fontSize: 14,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          Text(
+            value,
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAccountStatusCard() {
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.grey.shade100),
+      ),
+      child: Column(
+        children: [
+          const CircleAvatar(
+            radius: 30,
+            backgroundColor: Color(0xFFF0EDFF),
+            child: Icon(
+              Icons.verified_user,
+              color: Color(0xFF6C5CE7),
+              size: 30,
+            ),
+          ),
+          const SizedBox(height: 16),
+          const Text(
+            'Account Verified',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Your account is fully registered and verified with the university portal.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildQuickActionsCard(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.grey.shade100),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Quick Actions',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 16),
+          _buildActionButton(Icons.lock_outline, 'Change Password', () {}),
+          _buildActionButton(
+            Icons.notifications_outlined,
+            'Notifications',
+            () {},
+          ),
+          _buildActionButton(Icons.help_outline, 'Get Support', () {}),
+          const Divider(height: 32),
+          _buildActionButton(Icons.logout, 'Log Out', () {
+            AppData().logout();
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(builder: (_) => const LoginScreen()),
+            );
+          }, isDestructive: true),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionButton(
+    IconData icon,
+    String label,
+    VoidCallback onTap, {
+    bool isDestructive = false,
+  }) {
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      onTap: onTap,
+      leading: Icon(
+        icon,
+        size: 20,
+        color: isDestructive ? Colors.redAccent : Colors.grey.shade600,
+      ),
+      title: Text(
+        label,
+        style: TextStyle(
+          fontSize: 14,
+          fontWeight: FontWeight.w500,
+          color: isDestructive ? Colors.redAccent : Colors.black87,
+        ),
+      ),
+      trailing: const Icon(Icons.chevron_right, size: 18),
+    );
+  }
 }
 
 // ---------------------------------------------------------
@@ -1471,21 +2030,29 @@ class DashboardView extends StatelessWidget {
             children: [
               _buildStatCard(
                 isTeacher ? 'Active Courses' : 'Enrolled Courses',
-                isTeacher ? '8' : '22',
+                AppData().filteredClasses.length.toString(),
                 Icons.library_books,
                 Colors.blue,
               ),
               const SizedBox(width: 24),
               _buildStatCard(
                 isTeacher ? 'Assignments Created' : 'Pending Assignments',
-                '32',
+                AppData().classAssignments.values
+                    .expand((e) => e)
+                    .where((a) => !a['isDone'])
+                    .length
+                    .toString(),
                 Icons.assignment,
                 Colors.orange,
               ),
               const SizedBox(width: 24),
               _buildStatCard(
-                isTeacher ? 'Submissions to Review' : 'Completed Quizzes',
-                '11',
+                isTeacher ? 'Submissions to Review' : 'Completed Work',
+                AppData().classAssignments.values
+                    .expand((e) => e)
+                    .where((a) => a['isDone'])
+                    .length
+                    .toString(),
                 Icons.check_circle,
                 Colors.green,
               ),
@@ -1622,50 +2189,30 @@ class DashboardView extends StatelessWidget {
                                     ),
                                   ),
                                   Expanded(
-                                    child: LinearProgressIndicator(
-                                      value: c['progress'],
-                                      backgroundColor: Colors.grey.shade100,
-                                      color: c['color'],
-                                      borderRadius: BorderRadius.circular(4),
+                                    child: Align(
+                                      alignment: Alignment.centerRight,
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 12,
+                                          vertical: 4,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: c['color'].withAlpha(20),
+                                          borderRadius: BorderRadius.circular(
+                                            20,
+                                          ),
+                                        ),
+                                        child: Text(
+                                          'Active',
+                                          style: TextStyle(
+                                            color: c['color'],
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ),
                                     ),
                                   ),
-                                  const SizedBox(width: 16),
-                                  Text(
-                                    '${(c['progress'] * 100).toInt()}%',
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w600,
-                                      fontSize: 13,
-                                    ),
-                                  ),
-                                  if (AppData().currentUserRole == UserRole.teacher) ...[
-                                    IconButton(
-                                      icon: const Icon(
-                                        Icons.add_task,
-                                        color: Colors.orange,
-                                        size: 20,
-                                      ),
-                                      tooltip: 'Add Assignment',
-                                      onPressed:
-                                          () => _openCreateAssignmentDialog(
-                                            context,
-                                            c['id'],
-                                          ),
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(
-                                        Icons.quiz_outlined,
-                                        color: Color(0xFF6C5CE7),
-                                        size: 20,
-                                      ),
-                                      tooltip: 'Add MCQ Test',
-                                      onPressed:
-                                          () => _openCreateMcqTestDialog(
-                                            context,
-                                            c['id'],
-                                            onRefresh: () => setState(() {}),
-                                          ),
-                                    ),
-                                  ],
                                   IconButton(
                                     icon: const Icon(
                                       Icons.more_horiz,
@@ -1927,8 +2474,9 @@ class DashboardView extends StatelessWidget {
           height: 150 * fillPercent,
           width: 36,
           decoration: BoxDecoration(
-            color:
-                isHighlighted ? const Color(0xFF6C5CE7) : Colors.grey.shade200,
+            color: isHighlighted
+                ? const Color(0xFF6C5CE7)
+                : Colors.grey.shade200,
             borderRadius: BorderRadius.circular(8),
           ),
         ),
@@ -2077,62 +2625,60 @@ class CoursesView extends StatelessWidget {
                           child: Container(
                             color: cls['color'],
                             padding: const EdgeInsets.all(24),
-                            child: Column(
+                            child: Row(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text(
-                                  cls['title'],
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 20,
-                                    fontWeight: FontWeight.bold,
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        cls['title'],
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 20,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                      Text(
+                                        cls['subtitle'],
+                                        style: TextStyle(
+                                          color: Colors.white.withAlpha(200),
+                                          fontSize: 14,
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
-                                Text(
-                                  cls['subtitle'],
-                                  style: TextStyle(
-                                    color: Colors.white.withAlpha(200),
-                                    fontSize: 14,
-                                  ),
+                                Icon(
+                                  Icons.menu_book,
+                                  color: Colors.white.withAlpha(150),
+                                  size: 32,
                                 ),
                               ],
                             ),
                           ),
                         ),
                         Expanded(
-                          flex: 2,
+                          flex: 1,
                           child: Padding(
-                            padding: const EdgeInsets.all(20),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisAlignment: MainAxisAlignment.center,
+                            padding: const EdgeInsets.symmetric(horizontal: 20),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
-                                Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceBetween,
-                                  children: [
-                                    const Text(
-                                      'Course Progress',
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                    Text(
-                                      '${(cls['progress'] * 100).toInt()}%',
-                                      style: TextStyle(
-                                        color: cls['color'],
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ],
+                                const Text(
+                                  'Explore Syllabus',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.black87,
+                                  ),
                                 ),
-                                const SizedBox(height: 8),
-                                LinearProgressIndicator(
-                                  value: cls['progress'],
+                                Icon(
+                                  Icons.arrow_forward_ios,
+                                  size: 14,
                                   color: cls['color'],
-                                  backgroundColor: Colors.grey.shade200,
-                                  borderRadius: BorderRadius.circular(8),
                                 ),
                               ],
                             ),
@@ -2235,18 +2781,17 @@ class _LiveClassViewState extends State<LiveClassView> {
                       ],
                     ),
                     clipBehavior: Clip.antiAlias,
-                    child:
-                        isCameraInitialized && !isVideoOff
-                            ? AspectRatio(
-                              aspectRatio: _cameraController!.value.aspectRatio,
-                              child: CameraPreview(_cameraController!),
-                            )
-                            : const Center(
-                              child: Text(
-                                "Camera is starting...",
-                                style: TextStyle(color: Colors.white),
-                              ),
+                    child: isCameraInitialized && !isVideoOff
+                        ? AspectRatio(
+                            aspectRatio: _cameraController!.value.aspectRatio,
+                            child: CameraPreview(_cameraController!),
+                          )
+                        : const Center(
+                            child: Text(
+                              "Camera is starting...",
+                              style: TextStyle(color: Colors.white),
                             ),
+                          ),
                   ),
                   const SizedBox(height: 32),
                   Row(
@@ -2493,70 +3038,69 @@ class _LiveClassViewState extends State<LiveClassView> {
                         AppData().setMeetingCode(newCode);
                         showDialog(
                           context: context,
-                          builder:
-                              (ctx) => AlertDialog(
-                                title: const Text("Here's your meeting link"),
-                                content: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    const Text(
-                                      "Copy this link and send it to people you want to meet with. Be sure to save it so you can use it later, too.",
-                                    ),
-                                    const SizedBox(height: 16),
-                                    Container(
-                                      decoration: BoxDecoration(
-                                        color: Colors.grey.shade100,
-                                        borderRadius: BorderRadius.circular(8),
-                                      ),
-                                      child: ListTile(
-                                        title: Text(
-                                          newCode,
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                            letterSpacing: 1.2,
-                                          ),
-                                        ),
-                                        trailing: IconButton(
-                                          icon: const Icon(
-                                            Icons.copy,
-                                            color: Colors.grey,
-                                          ),
-                                          onPressed: () {
-                                            Clipboard.setData(
-                                              ClipboardData(text: newCode),
-                                            );
-                                            ScaffoldMessenger.of(
-                                              context,
-                                            ).showSnackBar(
-                                              const SnackBar(
-                                                content: Text(
-                                                  'Meeting code copied!',
-                                                ),
-                                              ),
-                                            );
-                                          },
-                                        ),
-                                      ),
-                                    ),
-                                  ],
+                          builder: (ctx) => AlertDialog(
+                            title: const Text("Here's your meeting link"),
+                            content: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  "Copy this link and send it to people you want to meet with. Be sure to save it so you can use it later, too.",
                                 ),
-                                actions: [
-                                  TextButton(
-                                    onPressed: () {
-                                      Navigator.pop(ctx);
-                                      setState(() => isCodeVerified = true);
-                                    },
-                                    child: const Text(
-                                      'Join Now',
-                                      style: TextStyle(
-                                        color: Color(0xFF6C5CE7),
+                                const SizedBox(height: 16),
+                                Container(
+                                  decoration: BoxDecoration(
+                                    color: Colors.grey.shade100,
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: ListTile(
+                                    title: Text(
+                                      newCode,
+                                      style: const TextStyle(
                                         fontWeight: FontWeight.bold,
+                                        letterSpacing: 1.2,
                                       ),
+                                    ),
+                                    trailing: IconButton(
+                                      icon: const Icon(
+                                        Icons.copy,
+                                        color: Colors.grey,
+                                      ),
+                                      onPressed: () {
+                                        Clipboard.setData(
+                                          ClipboardData(text: newCode),
+                                        );
+                                        ScaffoldMessenger.of(
+                                          context,
+                                        ).showSnackBar(
+                                          const SnackBar(
+                                            content: Text(
+                                              'Meeting code copied!',
+                                            ),
+                                          ),
+                                        );
+                                      },
                                     ),
                                   ),
-                                ],
+                                ),
+                              ],
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () {
+                                  Navigator.pop(ctx);
+                                  setState(() => isCodeVerified = true);
+                                },
+                                child: const Text(
+                                  'Join Now',
+                                  style: TextStyle(
+                                    color: Color(0xFF6C5CE7),
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
                               ),
+                            ],
+                          ),
                         );
                       },
                       icon: const Icon(Icons.video_call),
@@ -2602,9 +3146,8 @@ class _LiveClassViewState extends State<LiveClassView> {
                               Expanded(
                                 child: TextField(
                                   controller: joinCodeCtrl,
-                                  onChanged:
-                                      (val) =>
-                                          setState(() => joinErrorMsg = null),
+                                  onChanged: (val) =>
+                                      setState(() => joinErrorMsg = null),
                                   decoration: const InputDecoration(
                                     hintText: 'Enter a code or link',
                                     border: InputBorder.none,
@@ -2622,19 +3165,17 @@ class _LiveClassViewState extends State<LiveClassView> {
                               setState(() => isCodeVerified = true);
                             } else {
                               setState(
-                                () =>
-                                    joinErrorMsg =
-                                        'Invalid code. Wait for teacher to create a meeting.',
+                                () => joinErrorMsg =
+                                    'Invalid code. Wait for teacher to create a meeting.',
                               );
                             }
                           },
                           child: Text(
                             'Join',
                             style: TextStyle(
-                              color:
-                                  joinCodeCtrl.text.isEmpty
-                                      ? Colors.grey
-                                      : const Color(0xFF6C5CE7),
+                              color: joinCodeCtrl.text.isEmpty
+                                  ? Colors.grey
+                                  : const Color(0xFF6C5CE7),
                               fontWeight: FontWeight.w600,
                               fontSize: 16,
                             ),
@@ -2819,13 +3360,12 @@ class _LiveClassViewState extends State<LiveClassView> {
                           IconButton(
                             icon: Icon(
                               Icons.chat_bubble_outline,
-                              color:
-                                  isChatOpen
-                                      ? const Color(0xFF8AB4F8)
-                                      : Colors.white,
+                              color: isChatOpen
+                                  ? const Color(0xFF8AB4F8)
+                                  : Colors.white,
                             ),
-                            onPressed:
-                                () => setState(() => isChatOpen = !isChatOpen),
+                            onPressed: () =>
+                                setState(() => isChatOpen = !isChatOpen),
                           ),
                         ],
                       ),
@@ -3033,9 +3573,18 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                   ),
                 ),
                 if (isTeacher)
-                  const Text(
-                    'Review and grade assignments below',
-                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  ElevatedButton.icon(
+                    onPressed: () => _openCreateAssignmentDialog(context),
+                    icon: const Icon(Icons.add),
+                    label: const Text('Create Global Assignment'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF6C5CE7),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 24,
+                        vertical: 16,
+                      ),
+                    ),
                   ),
               ],
             ),
@@ -3061,11 +3610,10 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                         Navigator.push(
                           context,
                           MaterialPageRoute(
-                            builder:
-                                (_) => AssignmentInteractionScreen(
-                                  assignment: a,
-                                  classColor: cls['color'],
-                                ),
+                            builder: (_) => AssignmentInteractionScreen(
+                              assignment: a,
+                              classColor: cls['color'],
+                            ),
                           ),
                         );
                       },
@@ -3131,9 +3679,9 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                               Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  const Text(
-                                    '0/25 Submitted',
-                                    style: TextStyle(
+                                  Text(
+                                    '${AppData().registeredStudents.length} Assigned',
+                                    style: const TextStyle(
                                       color: Color(0xFF6C5CE7),
                                       fontWeight: FontWeight.w600,
                                     ),
@@ -3158,13 +3706,13 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                             else
                               a['isDone']
                                   ? const Icon(
-                                    Icons.check_circle,
-                                    color: Colors.green,
-                                  )
+                                      Icons.check_circle,
+                                      color: Colors.green,
+                                    )
                                   : const Icon(
-                                    Icons.pending_actions,
-                                    color: Colors.orange,
-                                  ),
+                                      Icons.pending_actions,
+                                      color: Colors.orange,
+                                    ),
                           ],
                         ),
                       ),
@@ -3186,268 +3734,254 @@ class _AssignmentsViewState extends State<AssignmentsView> {
   ) {
     showDialog(
       context: context,
-      builder:
-          (ctx) => AlertDialog(
-            title: const Text('Confirm Delete'),
-            content: const Text(
-              'Are you sure you want to delete this assignment? This action cannot be undone.',
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Cancel'),
-              ),
-              TextButton(
-                onPressed: () {
-                  AppData().deleteAssignment(classId, assignmentId);
-                  Navigator.pop(ctx);
-                  setState(() {});
-                },
-                style: TextButton.styleFrom(foregroundColor: Colors.red),
-                child: const Text('Delete'),
-              ),
-            ],
+      builder: (ctx) => AlertDialog(
+        title: const Text('Confirm Delete'),
+        content: const Text(
+          'Are you sure you want to delete this assignment? This action cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
           ),
+          TextButton(
+            onPressed: () {
+              AppData().deleteAssignment(classId, assignmentId);
+              Navigator.pop(ctx);
+              setState(() {});
+            },
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
     );
   }
 
+  void _openCreateAssignmentDialog(BuildContext context) {
+    TextEditingController titleCtrl = TextEditingController();
+    DateTime startDateTime = DateTime.now();
+    DateTime endDateTime = DateTime.now().add(const Duration(days: 7));
+    String? selectedClassId = AppData().filteredClasses.first['id'];
+    String selectedYear = '1st Year';
+    String selectedSem = 'Sem 1';
+    PlatformFile? pickedFile;
+    List<dynamic>? mcqData;
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            return AlertDialog(
+              title: const Text('Create New Assignment'),
+              content: SizedBox(
+                width: 400,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: DropdownButtonFormField<String>(
+                              value: selectedYear,
+                              items:
+                                  [
+                                        '1st Year',
+                                        '2nd Year',
+                                        '3rd Year',
+                                        '4th Year',
+                                      ]
+                                      .map(
+                                        (y) => DropdownMenuItem(
+                                          value: y,
+                                          child: Text(y),
+                                        ),
+                                      )
+                                      .toList(),
+                              onChanged: (val) =>
+                                  setDialogState(() => selectedYear = val!),
+                              decoration: const InputDecoration(
+                                labelText: 'Year',
+                                border: OutlineInputBorder(),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: DropdownButtonFormField<String>(
+                              value: selectedSem,
+                              items:
+                                  [
+                                        'Sem 1',
+                                        'Sem 2',
+                                        'Sem 3',
+                                        'Sem 4',
+                                        'Sem 5',
+                                        'Sem 6',
+                                        'Sem 7',
+                                        'Sem 8',
+                                      ]
+                                      .map(
+                                        (s) => DropdownMenuItem(
+                                          value: s,
+                                          child: Text(s),
+                                        ),
+                                      )
+                                      .toList(),
+                              onChanged: (val) =>
+                                  setDialogState(() => selectedSem = val!),
+                              decoration: const InputDecoration(
+                                labelText: 'Semester',
+                                border: OutlineInputBorder(),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: titleCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Assignment Title',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      ListTile(
+                        shape: RoundedRectangleBorder(
+                          side: BorderSide(color: Colors.grey.shade400),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        title: Text(
+                          'Start: ${startDateTime.toString().substring(0, 16)}',
+                        ),
+                        trailing: const Icon(Icons.calendar_month),
+                        onTap: () async {
+                          DateTime? date = await showDatePicker(
+                            context: ctx,
+                            initialDate: startDateTime,
+                            firstDate: DateTime.now().subtract(
+                              const Duration(days: 365),
+                            ),
+                            lastDate: DateTime(2030),
+                          );
+                          if (date != null) {
+                            TimeOfDay? time = await showTimePicker(
+                              context: ctx,
+                              initialTime: TimeOfDay.fromDateTime(
+                                startDateTime,
+                              ),
+                            );
+                            if (time != null) {
+                              setDialogState(() {
+                                startDateTime = DateTime(
+                                  date.year,
+                                  date.month,
+                                  date.day,
+                                  time.hour,
+                                  time.minute,
+                                );
+                              });
+                            }
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 16),
+                      ListTile(
+                        shape: RoundedRectangleBorder(
+                          side: BorderSide(color: Colors.grey.shade400),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        title: Text(
+                          'End: ${endDateTime.toString().substring(0, 16)}',
+                        ),
+                        trailing: const Icon(Icons.calendar_month),
+                        onTap: () async {
+                          DateTime? date = await showDatePicker(
+                            context: ctx,
+                            initialDate: endDateTime,
+                            firstDate: startDateTime,
+                            lastDate: DateTime(2030),
+                          );
+                          if (date != null) {
+                            TimeOfDay? time = await showTimePicker(
+                              context: ctx,
+                              initialTime: TimeOfDay.fromDateTime(endDateTime),
+                            );
+                            if (time != null) {
+                              setDialogState(() {
+                                endDateTime = DateTime(
+                                  date.year,
+                                  date.month,
+                                  date.day,
+                                  time.hour,
+                                  time.minute,
+                                );
+                              });
+                            }
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 16),
+                      OutlinedButton.icon(
+                        onPressed: () async {
+                          var res = await FilePicker.platform.pickFiles();
+                          if (res != null) {
+                            setDialogState(() => pickedFile = res.files.first);
+                          }
+                        },
+                        icon: const Icon(Icons.attach_file),
+                        label: Text(
+                          pickedFile != null
+                              ? pickedFile!.name
+                              : 'Attach Assignment File',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    if (titleCtrl.text.isNotEmpty && selectedClassId != null) {
+                      AppData().addAssignment(
+                        selectedClassId!,
+                        titleCtrl.text,
+                        endDateTime.toString().substring(0, 16),
+                        year: selectedYear,
+                        semester: selectedSem,
+                        file: pickedFile,
+                        mcqData: mcqData,
+                        startDateTime: startDateTime,
+                        dueDateTime: endDateTime,
+                      );
+                      Navigator.pop(ctx);
+                      setState(() {}); // refresh global list
+                    }
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF6C5CE7),
+                    foregroundColor: Colors.white,
+                  ),
+                  child: const Text('Upload Assignment'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
   }
-
-void _openCreateAssignmentDialog(BuildContext context, String classId, {VoidCallback? onRefresh}) {
-  TextEditingController titleCtrl = TextEditingController();
-  DateTime startDateTime = DateTime.now();
-  DateTime endDateTime = DateTime.now().add(const Duration(days: 7));
-  String selectedYear = '1st Year';
-  String selectedSem = 'Sem 1';
-  PlatformFile? pickedFile;
-  List<dynamic>? mcqData;
-
-  showDialog(
-    context: context,
-    builder: (ctx) {
-      return StatefulBuilder(
-        builder: (ctx, setDialogState) {
-          return AlertDialog(
-            title: const Text('Create New Assignment'),
-            content: SizedBox(
-              width: 400,
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: DropdownButtonFormField<String>(
-                            value: selectedYear,
-                            items:
-                                [
-                                      '1st Year',
-                                      '2nd Year',
-                                      '3rd Year',
-                                      '4th Year',
-                                    ]
-                                    .map(
-                                      (y) => DropdownMenuItem(
-                                        value: y,
-                                        child: Text(y),
-                                      ),
-                                    )
-                                    .toList(),
-                            onChanged:
-                                (val) =>
-                                    setDialogState(() => selectedYear = val!),
-                            decoration: const InputDecoration(
-                              labelText: 'Year',
-                              border: OutlineInputBorder(),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          child: DropdownButtonFormField<String>(
-                            value: selectedSem,
-                            items:
-                                [
-                                      'Sem 1',
-                                      'Sem 2',
-                                      'Sem 3',
-                                      'Sem 4',
-                                      'Sem 5',
-                                      'Sem 6',
-                                      'Sem 7',
-                                      'Sem 8',
-                                    ]
-                                    .map(
-                                      (s) => DropdownMenuItem(
-                                        value: s,
-                                        child: Text(s),
-                                      ),
-                                    )
-                                    .toList(),
-                            onChanged:
-                                (val) =>
-                                    setDialogState(() => selectedSem = val!),
-                            decoration: const InputDecoration(
-                              labelText: 'Semester',
-                              border: OutlineInputBorder(),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-                    Center(
-                      child: Text(
-                        'Assignment for: ${AppData().classes.firstWhere((c) => c['id'] == classId)['title']}',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF6C5CE7),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: titleCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'Assignment Title',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    ListTile(
-                      shape: RoundedRectangleBorder(
-                        side: BorderSide(color: Colors.grey.shade400),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      title: Text(
-                        'Start: ${startDateTime.toString().substring(0, 16)}',
-                      ),
-                      trailing: const Icon(Icons.calendar_month),
-                      onTap: () async {
-                        DateTime? date = await showDatePicker(
-                          context: ctx,
-                          initialDate: startDateTime,
-                          firstDate: DateTime.now().subtract(
-                            const Duration(days: 365),
-                          ),
-                          lastDate: DateTime(2030),
-                        );
-                        if (date != null) {
-                          TimeOfDay? time = await showTimePicker(
-                            context: ctx,
-                            initialTime: TimeOfDay.fromDateTime(
-                              startDateTime,
-                            ),
-                          );
-                          if (time != null) {
-                            setDialogState(() {
-                              startDateTime = DateTime(
-                                date.year,
-                                date.month,
-                                date.day,
-                                time.hour,
-                                time.minute,
-                              );
-                            });
-                          }
-                        }
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    ListTile(
-                      shape: RoundedRectangleBorder(
-                        side: BorderSide(color: Colors.grey.shade400),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      title: Text(
-                        'End: ${endDateTime.toString().substring(0, 16)}',
-                      ),
-                      trailing: const Icon(Icons.calendar_month),
-                      onTap: () async {
-                        DateTime? date = await showDatePicker(
-                          context: ctx,
-                          initialDate: endDateTime,
-                          firstDate: startDateTime,
-                          lastDate: DateTime(2030),
-                        );
-                        if (date != null) {
-                          TimeOfDay? time = await showTimePicker(
-                            context: ctx,
-                            initialTime: TimeOfDay.fromDateTime(endDateTime),
-                          );
-                          if (time != null) {
-                            setDialogState(() {
-                              endDateTime = DateTime(
-                                date.year,
-                                date.month,
-                                date.day,
-                                time.hour,
-                                time.minute,
-                              );
-                            });
-                          }
-                        }
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    OutlinedButton.icon(
-                      onPressed: () async {
-                        var res = await FilePicker.platform.pickFiles(withData: true);
-                        if (res != null) {
-                          setDialogState(() => pickedFile = res.files.first);
-                        }
-                      },
-                      icon: const Icon(Icons.attach_file),
-                      label: Text(
-                        pickedFile != null
-                            ? pickedFile!.name
-                            : 'Attach Assignment File',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Cancel'),
-              ),
-              ElevatedButton(
-                onPressed: () {
-                  if (titleCtrl.text.isNotEmpty) {
-                    AppData().addAssignment(
-                      classId,
-                      titleCtrl.text,
-                      endDateTime.toString().substring(0, 16),
-                      year: selectedYear,
-                      semester: selectedSem,
-                      file: pickedFile,
-                      mcqData: mcqData,
-                      startDateTime: startDateTime,
-                      dueDateTime: endDateTime,
-                    );
-                    Navigator.pop(ctx);
-                    if (onRefresh != null) onRefresh();
-                  }
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF6C5CE7),
-                  foregroundColor: Colors.white,
-                ),
-                child: const Text('Upload Assignment'),
-              ),
-            ],
-          );
-        },
-      );
-    },
-  );
-}
 }
 
 // ---------------------------------------------------------
@@ -3536,12 +4070,8 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                           ),
                           if (isTeacher)
                             ElevatedButton.icon(
-                              onPressed:
-                                  () => _openCreateAssignmentDialog(
-                                    context,
-                                    classId,
-                                    onRefresh: () => setState(() {}),
-                                  ),
+                              onPressed: () =>
+                                  _openCreateAssignmentDialog(context, classId),
                               icon: const Icon(Icons.add),
                               label: const Text('Create Assignment'),
                               style: ElevatedButton.styleFrom(
@@ -3563,185 +4093,169 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                             return const Text('No assignments yet.');
 
                           return Column(
-                            children:
-                                assigns.map((a) {
-                                  return Card(
-                                    margin: const EdgeInsets.only(bottom: 16),
-                                    elevation: 0,
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(16),
-                                      side: BorderSide(
-                                        color: Colors.grey.shade200,
+                            children: assigns.map((a) {
+                              return Card(
+                                margin: const EdgeInsets.only(bottom: 16),
+                                elevation: 0,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(16),
+                                  side: BorderSide(color: Colors.grey.shade200),
+                                ),
+                                child: InkWell(
+                                  borderRadius: BorderRadius.circular(16),
+                                  onTap: () {
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (_) =>
+                                            AssignmentInteractionScreen(
+                                              assignment: a,
+                                              classColor:
+                                                  widget.classData['color'],
+                                            ),
                                       ),
-                                    ),
-                                    child: InkWell(
-                                      borderRadius: BorderRadius.circular(16),
-                                      onTap: () {
-                                        Navigator.push(
-                                          context,
-                                          MaterialPageRoute(
-                                            builder:
-                                                (
-                                                  _,
-                                                ) => AssignmentInteractionScreen(
-                                                  assignment: a,
-                                                  classColor:
-                                                      widget.classData['color'],
-                                                ),
+                                    );
+                                  },
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(24.0),
+                                    child: Row(
+                                      children: [
+                                        CircleAvatar(
+                                          radius: 24,
+                                          backgroundColor: widget
+                                              .classData['color']
+                                              .withAlpha(20),
+                                          child: Icon(
+                                            Icons.assignment,
+                                            color: widget.classData['color'],
                                           ),
-                                        );
-                                      },
-                                      child: Padding(
-                                        padding: const EdgeInsets.all(24.0),
-                                        child: Row(
-                                          children: [
-                                            CircleAvatar(
-                                              radius: 24,
-                                              backgroundColor: widget
-                                                  .classData['color']
-                                                  .withAlpha(20),
-                                              child: Icon(
-                                                Icons.assignment,
-                                                color:
-                                                    widget.classData['color'],
-                                              ),
-                                            ),
-                                            const SizedBox(width: 24),
-                                            Expanded(
-                                              child: Column(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.start,
-                                                children: [
-                                                  Text(
-                                                    a['title'],
-                                                    style: const TextStyle(
-                                                      fontSize: 18,
-                                                      fontWeight:
-                                                          FontWeight.bold,
-                                                    ),
-                                                  ),
-                                                  const SizedBox(height: 4),
-                                                  Text(
-                                                    (a['startDateTime'] !=
-                                                                null &&
-                                                            a['dueDateTime'] !=
-                                                                null)
-                                                        ? 'Window: ${a['startDateTime'].toString().substring(0, 16)} to ${a['dueDateTime'].toString().substring(0, 16)}  •  ${a['year']} ${a['semester']}'
-                                                        : 'Due: ${a['dueDate']}  •  ${a['year']} ${a['semester']}',
-                                                    style: TextStyle(
-                                                      color:
-                                                          Colors.grey.shade600,
-                                                    ),
-                                                  ),
-                                                  if (a['instructorFileName'] !=
-                                                      null)
-                                                    Padding(
-                                                      padding:
-                                                          const EdgeInsets.only(
-                                                            top: 4,
-                                                          ),
-                                                      child: Row(
-                                                        children: [
-                                                          const Icon(
-                                                            Icons.attach_file,
-                                                            size: 14,
-                                                            color: Colors.grey,
-                                                          ),
-                                                          const SizedBox(
-                                                            width: 4,
-                                                          ),
-                                                          Text(
-                                                            a['instructorFileName'],
-                                                            style: TextStyle(
-                                                              fontSize: 12,
-                                                              color:
-                                                                  Colors
-                                                                      .grey
-                                                                      .shade600,
-                                                            ),
-                                                          ),
-                                                        ],
-                                                      ),
-                                                    ),
-                                                ],
-                                              ),
-                                            ),
-                                            if (isTeacher)
-                                              Row(
-                                                mainAxisSize: MainAxisSize.min,
-                                                children: [
-                                                  Text(
-                                                    ((a['isDone'] ?? false) &&
-                                                            !(a['isMissed'] ??
-                                                                false))
-                                                        ? '1/25 Submitted'
-                                                        : '0/25 Submitted',
-                                                    style: const TextStyle(
-                                                      color: Color(0xFF6C5CE7),
-                                                      fontWeight:
-                                                          FontWeight.w600,
-                                                    ),
-                                                  ),
-                                                  const SizedBox(width: 8),
-                                                  IconButton(
-                                                    icon: const Icon(
-                                                      Icons.delete_outline,
-                                                      color: Colors.red,
-                                                      size: 20,
-                                                    ),
-                                                    onPressed: () {
-                                                      _showDeleteConfirmation(
-                                                        context,
-                                                        classId,
-                                                        a['id'],
-                                                        onRefresh: () => setState(() {}),
-                                                      );
-                                                    },
-                                                  ),
-                                                ],
-                                              )
-                                            else if ((a['isDone'] ?? false) &&
-                                                !(a['isMissed'] ?? false))
-                                              const Icon(
-                                                Icons.check_circle,
-                                                color: Colors.green,
-                                              )
-                                            else if ((a['dueDateTime'] !=
-                                                        null &&
-                                                    DateTime.now().isAfter(
-                                                      a['dueDateTime'],
-                                                    )) ||
-                                                (a['isMissed'] ?? false))
-                                              Row(
-                                                mainAxisSize: MainAxisSize.min,
-                                                children: [
-                                                  const Icon(
-                                                    Icons.error_outline,
-                                                    color: Colors.red,
-                                                  ),
-                                                  const SizedBox(width: 4),
-                                                  const Text(
-                                                    'Test Is Over',
-                                                    style: TextStyle(
-                                                      color: Colors.red,
-                                                      fontWeight:
-                                                          FontWeight.bold,
-                                                      fontSize: 12,
-                                                    ),
-                                                  ),
-                                                ],
-                                              )
-                                            else
-                                              const Icon(
-                                                Icons.pending_actions,
-                                                color: Colors.orange,
-                                              ),
-                                          ],
                                         ),
-                                      ),
+                                        const SizedBox(width: 24),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                a['title'],
+                                                style: const TextStyle(
+                                                  fontSize: 18,
+                                                  fontWeight: FontWeight.bold,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 4),
+                                              Text(
+                                                (a['startDateTime'] != null &&
+                                                        a['dueDateTime'] !=
+                                                            null)
+                                                    ? 'Window: ${a['startDateTime'].toString().substring(0, 16)} to ${a['dueDateTime'].toString().substring(0, 16)}  •  ${a['year']} ${a['semester']}'
+                                                    : 'Due: ${a['dueDate']}  •  ${a['year']} ${a['semester']}',
+                                                style: TextStyle(
+                                                  color: Colors.grey.shade600,
+                                                ),
+                                              ),
+                                              if (a['instructorFileName'] !=
+                                                  null)
+                                                Padding(
+                                                  padding:
+                                                      const EdgeInsets.only(
+                                                        top: 4,
+                                                      ),
+                                                  child: Row(
+                                                    children: [
+                                                      const Icon(
+                                                        Icons.attach_file,
+                                                        size: 14,
+                                                        color: Colors.grey,
+                                                      ),
+                                                      const SizedBox(width: 4),
+                                                      Text(
+                                                        a['instructorFileName'],
+                                                        style: TextStyle(
+                                                          fontSize: 12,
+                                                          color: Colors
+                                                              .grey
+                                                              .shade600,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                            ],
+                                          ),
+                                        ),
+                                        if (isTeacher)
+                                          Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Text(
+                                                ((a['isDone'] ?? false) &&
+                                                        !(a['isMissed'] ??
+                                                            false))
+                                                    ? '1 Submitted'
+                                                    : '0 Submitted',
+                                                style: const TextStyle(
+                                                  color: Color(0xFF6C5CE7),
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                              ),
+                                              const SizedBox(width: 8),
+                                              IconButton(
+                                                icon: const Icon(
+                                                  Icons.delete_outline,
+                                                  color: Colors.red,
+                                                  size: 20,
+                                                ),
+                                                onPressed: () {
+                                                  _showDeleteConfirmation(
+                                                    context,
+                                                    classId,
+                                                    a['id'],
+                                                  );
+                                                },
+                                              ),
+                                            ],
+                                          )
+                                        else if ((a['isDone'] ?? false) &&
+                                            !(a['isMissed'] ?? false))
+                                          const Icon(
+                                            Icons.check_circle,
+                                            color: Colors.green,
+                                          )
+                                        else if ((a['dueDateTime'] != null &&
+                                                DateTime.now().isAfter(
+                                                  a['dueDateTime'],
+                                                )) ||
+                                            (a['isMissed'] ?? false))
+                                          Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              const Icon(
+                                                Icons.error_outline,
+                                                color: Colors.red,
+                                              ),
+                                              const SizedBox(width: 4),
+                                              const Text(
+                                                'Test Is Over',
+                                                style: TextStyle(
+                                                  color: Colors.red,
+                                                  fontWeight: FontWeight.bold,
+                                                  fontSize: 12,
+                                                ),
+                                              ),
+                                            ],
+                                          )
+                                        else
+                                          const Icon(
+                                            Icons.pending_actions,
+                                            color: Colors.orange,
+                                          ),
+                                      ],
                                     ),
-                                  );
-                                }).toList(),
+                                  ),
+                                ),
+                              );
+                            }).toList(),
                           );
                         },
                       ),
@@ -3793,33 +4307,242 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
   void _showDeleteConfirmation(
     BuildContext context,
     String classId,
-    String assignmentId, {
-    VoidCallback? onRefresh,
-  }) {
+    String assignmentId,
+  ) {
     showDialog(
       context: context,
-      builder:
-          (ctx) => AlertDialog(
-            title: const Text('Confirm Delete'),
-            content: const Text(
-              'Are you sure you want to delete this classwork? This action cannot be undone.',
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Cancel'),
-              ),
-              TextButton(
-                onPressed: () {
-                  AppData().deleteAssignment(classId, assignmentId);
-                  Navigator.pop(ctx);
-                  if (onRefresh != null) onRefresh();
-                },
-                style: TextButton.styleFrom(foregroundColor: Colors.red),
-                child: const Text('Delete'),
-              ),
-            ],
+      builder: (ctx) => AlertDialog(
+        title: const Text('Confirm Delete'),
+        content: const Text(
+          'Are you sure you want to delete this classwork? This action cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
           ),
+          TextButton(
+            onPressed: () {
+              AppData().deleteAssignment(classId, assignmentId);
+              Navigator.pop(ctx);
+            },
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _openCreateAssignmentDialog(BuildContext context, String classId) {
+    TextEditingController titleCtrl = TextEditingController();
+    DateTime startDateTime = DateTime.now();
+    DateTime endDateTime = DateTime.now().add(const Duration(days: 7));
+    String selectedYear = '1st Year';
+    String selectedSem = 'Sem 1';
+    PlatformFile? pickedFile;
+    List<dynamic>? mcqData;
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            return AlertDialog(
+              title: const Text('Create Assignment'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            value: selectedYear,
+                            items:
+                                ['1st Year', '2nd Year', '3rd Year', '4th Year']
+                                    .map(
+                                      (y) => DropdownMenuItem(
+                                        value: y,
+                                        child: Text(y),
+                                      ),
+                                    )
+                                    .toList(),
+                            onChanged: (val) =>
+                                setDialogState(() => selectedYear = val!),
+                            decoration: const InputDecoration(
+                              labelText: 'Year',
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            value: selectedSem,
+                            items:
+                                [
+                                      'Sem 1',
+                                      'Sem 2',
+                                      'Sem 3',
+                                      'Sem 4',
+                                      'Sem 5',
+                                      'Sem 6',
+                                      'Sem 7',
+                                      'Sem 8',
+                                    ]
+                                    .map(
+                                      (s) => DropdownMenuItem(
+                                        value: s,
+                                        child: Text(s),
+                                      ),
+                                    )
+                                    .toList(),
+                            onChanged: (val) =>
+                                setDialogState(() => selectedSem = val!),
+                            decoration: const InputDecoration(
+                              labelText: 'Semester',
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: titleCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Title',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    ListTile(
+                      shape: RoundedRectangleBorder(
+                        side: BorderSide(color: Colors.grey.shade400),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      title: Text(
+                        'Start: ${startDateTime.toString().substring(0, 16)}',
+                      ),
+                      trailing: const Icon(Icons.calendar_month),
+                      onTap: () async {
+                        DateTime? date = await showDatePicker(
+                          context: ctx,
+                          initialDate: startDateTime,
+                          firstDate: DateTime.now().subtract(
+                            const Duration(days: 365),
+                          ),
+                          lastDate: DateTime(2030),
+                        );
+                        if (date != null) {
+                          TimeOfDay? time = await showTimePicker(
+                            context: ctx,
+                            initialTime: TimeOfDay.fromDateTime(startDateTime),
+                          );
+                          if (time != null) {
+                            setDialogState(() {
+                              startDateTime = DateTime(
+                                date.year,
+                                date.month,
+                                date.day,
+                                time.hour,
+                                time.minute,
+                              );
+                            });
+                          }
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    ListTile(
+                      shape: RoundedRectangleBorder(
+                        side: BorderSide(color: Colors.grey.shade400),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      title: Text(
+                        'End: ${endDateTime.toString().substring(0, 16)}',
+                      ),
+                      trailing: const Icon(Icons.calendar_month),
+                      onTap: () async {
+                        DateTime? date = await showDatePicker(
+                          context: ctx,
+                          initialDate: endDateTime,
+                          firstDate: startDateTime,
+                          lastDate: DateTime(2030),
+                        );
+                        if (date != null) {
+                          TimeOfDay? time = await showTimePicker(
+                            context: ctx,
+                            initialTime: TimeOfDay.fromDateTime(endDateTime),
+                          );
+                          if (time != null) {
+                            setDialogState(() {
+                              endDateTime = DateTime(
+                                date.year,
+                                date.month,
+                                date.day,
+                                time.hour,
+                                time.minute,
+                              );
+                            });
+                          }
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    OutlinedButton.icon(
+                      onPressed: () async {
+                        var res = await FilePicker.platform.pickFiles();
+                        if (res != null) {
+                          setDialogState(() => pickedFile = res.files.first);
+                        }
+                      },
+                      icon: const Icon(Icons.attach_file),
+                      label: Text(
+                        pickedFile != null ? pickedFile!.name : 'Attach File',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    if (titleCtrl.text.isNotEmpty) {
+                      AppData().addAssignment(
+                        classId,
+                        titleCtrl.text,
+                        endDateTime.toString().substring(0, 16),
+                        year: selectedYear,
+                        semester: selectedSem,
+                        file: pickedFile,
+                        mcqData: mcqData,
+                        startDateTime: startDateTime,
+                        dueDateTime: endDateTime,
+                      );
+                      Navigator.pop(ctx);
+                      setState(() {});
+                    }
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF6C5CE7),
+                    foregroundColor: Colors.white,
+                  ),
+                  child: const Text('Upload'),
+                ),
+              ],
+            );
+          },
+        );
+      },
     );
   }
 }
@@ -3861,8 +4584,10 @@ class _AssignmentInteractionScreenState
   CameraController? _cameraController;
   bool _isCameraInitialized = false;
   Timer? _proctoringTimer;
-  Timer?
-  _clockTimer; // Ticks every second so start-time check re-evaluates automatically
+  Timer? _clockTimer;
+
+  get stdId =>
+      null; // Ticks every second so start-time check re-evaluates automatically
 
   @override
   void initState() {
@@ -3974,32 +4699,31 @@ class _AssignmentInteractionScreenState
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder:
-          (ctx) => AlertDialog(
-            title: const Row(
-              children: [
-                Icon(Icons.warning_amber_rounded, color: Colors.orange),
-                SizedBox(width: 8),
-                Text('Security Warning'),
-              ],
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Colors.orange),
+            SizedBox(width: 8),
+            Text('Security Warning'),
+          ],
+        ),
+        content: Text(message),
+        actions: [
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _isWarningDialogShown = false;
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF6C5CE7),
             ),
-            content: Text(message),
-            actions: [
-              ElevatedButton(
-                onPressed: () {
-                  Navigator.pop(ctx);
-                  _isWarningDialogShown = false;
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF6C5CE7),
-                ),
-                child: const Text(
-                  'I Understand',
-                  style: TextStyle(color: Colors.white),
-                ),
-              ),
-            ],
+            child: const Text(
+              'I Understand',
+              style: TextStyle(color: Colors.white),
+            ),
           ),
+        ],
+      ),
     );
   }
 
@@ -4140,8 +4864,9 @@ class _AssignmentInteractionScreenState
   void _shuffleQuestionsAndOptions() {
     final originalData = widget.assignment['mcqData'] as List<dynamic>;
     // Create a deep-ish copy to avoid modifying original ref
-    _shuffledMcqData =
-        originalData.map((q) => Map<String, dynamic>.from(q)).toList();
+    _shuffledMcqData = originalData
+        .map((q) => Map<String, dynamic>.from(q))
+        .toList();
 
     final random = Random();
 
@@ -4196,10 +4921,9 @@ class _AssignmentInteractionScreenState
 
     // If flagged for cheating (e.g., 3 mobile detections), score is automatically 0
     if (!isFlagged) {
-      List<dynamic> mcqData =
-          _shuffledMcqData.isNotEmpty
-              ? _shuffledMcqData
-              : (widget.assignment['mcqData'] as List<dynamic>);
+      List<dynamic> mcqData = _shuffledMcqData.isNotEmpty
+          ? _shuffledMcqData
+          : (widget.assignment['mcqData'] as List<dynamic>);
 
       for (int j = 0; j < mcqData.length; j++) {
         var q = mcqData[j];
@@ -4213,10 +4937,9 @@ class _AssignmentInteractionScreenState
         // If it's text, we compare it with the selected text
         String? expected = ans?.toString().trim().toLowerCase();
         String? selectedId = mcqAnswers[j]?.toString().trim().toLowerCase();
-        String? selectedText =
-            mcqAnswers[j] != null
-                ? q['options'][mcqAnswers[j]!].toString().trim().toLowerCase()
-                : null;
+        String? selectedText = mcqAnswers[j] != null
+            ? q['options'][mcqAnswers[j]!].toString().trim().toLowerCase()
+            : null;
 
         if (expected != null &&
             (selectedId == expected || selectedText == expected)) {
@@ -4236,7 +4959,6 @@ class _AssignmentInteractionScreenState
   Future<void> _pickFiles() async {
     FilePickerResult? result = await FilePicker.platform.pickFiles(
       allowMultiple: false,
-      withData: true,
     );
     if (result != null) {
       AppData().submitFiles(widget.assignment['id'], result.files);
@@ -4257,10 +4979,9 @@ class _AssignmentInteractionScreenState
         _handleBackPress();
       },
       child: Scaffold(
-        appBar:
-            (isStudent && !isTurnedIn && isMcq && _isMcqStartPressed)
-                ? null // Full screen for quiz after start
-                : AppBar(title: const Text('Assignment Details')),
+        appBar: (isStudent && !isTurnedIn && isMcq && _isMcqStartPressed)
+            ? null // Full screen for quiz after start
+            : AppBar(title: Text(isMcq ? 'MCQ Status' : 'Assignment Details')),
         body: AnimatedBuilder(
           animation: AppData(),
           builder: (context, _) {
@@ -4269,10 +4990,11 @@ class _AssignmentInteractionScreenState
             bool isTurnedIn = widget.assignment['isDone'] ?? false;
 
             DateTime? dueTime = widget.assignment['dueDateTime'];
+            bool isPastDue = dueTime != null && DateTime.now().isAfter(dueTime);
+
             if (AppData().currentUserRole == UserRole.student &&
                 !isTurnedIn &&
-                dueTime != null &&
-                DateTime.now().isAfter(dueTime)) {
+                isPastDue) {
               isTurnedIn = true;
             }
 
@@ -4368,20 +5090,28 @@ class _AssignmentInteractionScreenState
             );
 
             if (isTeacher) {
-              return Padding(
-                padding: const EdgeInsets.all(40.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    heroBanner,
-                    Expanded(
-                      child: SingleChildScrollView(
-                        physics: const BouncingScrollPhysics(),
-                        child: _buildTeacherReviewPanel(),
-                      ),
-                    ),
-                  ],
+              return FutureBuilder(
+                future: AppData().fetchAssignmentStatusesForTeacher(
+                  widget.assignment['id'],
+                  isMcq: widget.assignment['mcqData'] != null,
                 ),
+                builder: (context, snapshot) {
+                  return Padding(
+                    padding: const EdgeInsets.all(40.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        heroBanner,
+                        Expanded(
+                          child: SingleChildScrollView(
+                            physics: const BouncingScrollPhysics(),
+                            child: _buildTeacherReviewPanel(),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
               );
             }
 
@@ -4418,88 +5148,87 @@ class _AssignmentInteractionScreenState
                               ),
                             ),
                             const SizedBox(height: 16),
-                            Container(
-                              padding: const EdgeInsets.all(20),
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                borderRadius: BorderRadius.circular(16),
-                                border: Border.all(color: Colors.grey.shade200),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: Colors.black.withAlpha(5),
-                                    blurRadius: 10,
-                                    offset: const Offset(0, 2),
-                                  ),
-                                ],
-                              ),
-                              child: Row(
-                                children: [
-                                  Container(
-                                    padding: const EdgeInsets.all(12),
-                                    decoration: BoxDecoration(
-                                      color: widget.classColor.withAlpha(20),
-                                      borderRadius: BorderRadius.circular(12),
+                            InkWell(
+                              onTap: () async {
+                                final assignmentId = widget.assignment['id'];
+                                final fName =
+                                    widget.assignment['instructorFileName'];
+                                final storagePath = '$assignmentId/$fName';
+
+                                final String publicUrl = supabase.storage
+                                    .from('assignment-files')
+                                    .getPublicUrl(storagePath);
+
+                                final Uri uri = Uri.parse(publicUrl);
+                                if (await canLaunchUrl(uri)) {
+                                  await launchUrl(
+                                    uri,
+                                    mode: LaunchMode.externalApplication,
+                                  );
+                                } else {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text('Could not open file URL'),
                                     ),
-                                    child: Icon(
-                                      Icons.file_present_rounded,
-                                      color: widget.classColor,
-                                    ),
+                                  );
+                                }
+                              },
+                              borderRadius: BorderRadius.circular(16),
+                              child: Container(
+                                padding: const EdgeInsets.all(20),
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(16),
+                                  border: Border.all(
+                                    color: Colors.grey.shade200,
                                   ),
-                                  const SizedBox(width: 16),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          widget
-                                              .assignment['instructorFileName'],
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 16,
-                                          ),
-                                        ),
-                                        const Text(
-                                          'Assignment Reference Material',
-                                          style: TextStyle(
-                                            fontSize: 12,
-                                            color: Colors.grey,
-                                          ),
-                                        ),
-                                      ],
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: Colors.black.withAlpha(5),
+                                      blurRadius: 10,
+                                      offset: const Offset(0, 4),
                                     ),
-                                  ),
-                                  ElevatedButton.icon(
-                                    onPressed: () async {
-                                      final fileName = widget.assignment['instructorFileName'];
-                                      if (fileName == null) return;
-                                      
-                                      final url = supabase.storage
-                                          .from('assignments')
-                                          .getPublicUrl('${widget.assignment['id']}/$fileName');
-                                      
-                                      if (await canLaunchUrl(Uri.parse(url))) {
-                                        await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
-                                      } else {
-                                        if (!context.mounted) return;
-                                        ScaffoldMessenger.of(context).showSnackBar(
-                                          const SnackBar(content: Text('Could not open file')),
-                                        );
-                                      }
-                                      // Use window.open or similar if needed, 
-                                      // but for simplicity we rely on the public URL
-                                    },
-                                    icon: const Icon(Icons.download, size: 18),
-                                    label: const Text('Download'),
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: widget.classColor,
-                                      foregroundColor: Colors.white,
-                                      shape: RoundedRectangleBorder(
+                                  ],
+                                ),
+                                child: Row(
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.all(12),
+                                      decoration: BoxDecoration(
+                                        color: widget.classColor.withAlpha(20),
                                         borderRadius: BorderRadius.circular(12),
                                       ),
+                                      child: Icon(
+                                        Icons.description,
+                                        color: widget.classColor,
+                                      ),
                                     ),
-                                  ),
-                                ],
+                                    const SizedBox(width: 16),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            widget
+                                                .assignment['instructorFileName'],
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 16,
+                                            ),
+                                          ),
+                                          const Text(
+                                            'Assignment Reference Material (Tap to View)',
+                                            style: TextStyle(
+                                              fontSize: 12,
+                                              color: Colors.grey,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
                             const SizedBox(height: 32),
@@ -4521,7 +5250,7 @@ class _AssignmentInteractionScreenState
                               border: Border.all(color: Colors.grey.shade200),
                             ),
                             child: Text(
-                              'Please review the attached material and submit your workings below in Excel format.',
+                              'Please review the attached material and submit your workings.',
                               style: TextStyle(
                                 fontSize: 16,
                                 color: Colors.grey.shade800,
@@ -4536,7 +5265,13 @@ class _AssignmentInteractionScreenState
                   const SizedBox(width: 64),
                   Expanded(
                     flex: 2,
-                    child: _buildStudentUploadPanel(attachedFiles, isTurnedIn),
+                    child: (isPastDue && attachedFiles.isEmpty)
+                        ? _buildSubmissionClosedPanel()
+                        : _buildStudentUploadPanel(
+                            attachedFiles,
+                            isTurnedIn,
+                            isPastDue,
+                          ),
                   ),
                 ],
               ),
@@ -4550,6 +5285,7 @@ class _AssignmentInteractionScreenState
   Widget _buildStudentUploadPanel(
     List<PlatformFile> attachedFiles,
     bool isTurnedIn,
+    bool isPastDue,
   ) {
     return Container(
       padding: const EdgeInsets.all(32),
@@ -4585,23 +5321,28 @@ class _AssignmentInteractionScreenState
                   vertical: 8,
                 ),
                 decoration: BoxDecoration(
-                  color:
-                      isTurnedIn ? Colors.green.shade50 : Colors.orange.shade50,
+                  color: isTurnedIn
+                      ? Colors.green.shade50
+                      : Colors.orange.shade50,
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(
-                    color:
-                        isTurnedIn
-                            ? Colors.green.shade200
-                            : Colors.orange.shade200,
+                    color: isTurnedIn
+                        ? Colors.green.shade200
+                        : Colors.orange.shade200,
                   ),
                 ),
                 child: Text(
-                  isTurnedIn ? 'Turned in' : 'Assigned',
+                  isTurnedIn
+                      ? (isPastDue && widget.assignment['isDone'] != true
+                            ? 'Missing'
+                            : 'Turned in')
+                      : 'Assigned',
                   style: TextStyle(
-                    color:
-                        isTurnedIn
-                            ? Colors.green.shade700
-                            : Colors.orange.shade800,
+                    color: isTurnedIn
+                        ? (isPastDue && widget.assignment['isDone'] != true
+                              ? Colors.red.shade700
+                              : Colors.green.shade700)
+                        : Colors.orange.shade800,
                     fontWeight: FontWeight.bold,
                     fontSize: 13,
                   ),
@@ -4644,33 +5385,22 @@ class _AssignmentInteractionScreenState
                   maxLines: 1,
                   style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
-                trailing:
-                    isTurnedIn
-                        ? null
-                        : IconButton(
-                          icon: const Icon(Icons.close, color: Colors.grey),
-                          onPressed:
-                              () => AppData().removeFile(
-                                widget.assignment['id'],
-                                i,
-                              ),
-                        ),
+                trailing: (isTurnedIn || isPastDue)
+                    ? null
+                    : IconButton(
+                        icon: const Icon(Icons.close, color: Colors.grey),
+                        onPressed: () =>
+                            AppData().removeFile(widget.assignment['id'], i),
+                      ),
               ),
             );
           }),
 
-          if (!isTurnedIn && attachedFiles.isEmpty) ...[
+          if (!isTurnedIn && attachedFiles.isEmpty && !isPastDue) ...[
             InkWell(
               onTap: _pickFiles,
               borderRadius: BorderRadius.circular(16),
               child: DottedBorder(
-                options: RoundedRectDottedBorderOptions(
-                  color: widget.classColor,
-                  strokeWidth: 2,
-                  dashPattern: const [8, 4],
-                  radius: const Radius.circular(16),
-                  padding: const EdgeInsets.all(24),
-                ),
                 child: Center(
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -4725,8 +5455,9 @@ class _AssignmentInteractionScreenState
                         'Submissions: $subCount / 2',
                         textAlign: TextAlign.center,
                         style: TextStyle(
-                          color:
-                              limitReached ? Colors.red : Colors.grey.shade600,
+                          color: limitReached
+                              ? Colors.red
+                              : Colors.grey.shade600,
                           fontWeight: FontWeight.bold,
                           fontSize: 14,
                         ),
@@ -4748,25 +5479,23 @@ class _AssignmentInteractionScreenState
                   ElevatedButton(
                     onPressed:
                         ((limitReached && !isTurnedIn) ||
-                                (undoLimitReached && isTurnedIn))
-                            ? null
-                            : () =>
-                                AppData().toggleTurnIn(widget.assignment['id']),
+                            (undoLimitReached && isTurnedIn) ||
+                            isPastDue)
+                        ? null
+                        : () => AppData().toggleTurnIn(widget.assignment['id']),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor:
-                          isTurnedIn ? Colors.white : widget.classColor,
-                      foregroundColor:
-                          isTurnedIn ? Colors.black87 : Colors.white,
+                      backgroundColor: isTurnedIn
+                          ? Colors.white
+                          : widget.classColor,
+                      foregroundColor: isTurnedIn
+                          ? Colors.black87
+                          : Colors.white,
                       elevation: isTurnedIn ? 0 : 4,
                       shadowColor: widget.classColor.withAlpha(100),
                       disabledBackgroundColor: Colors.grey.shade300,
-                      side:
-                          isTurnedIn
-                              ? BorderSide(
-                                color: Colors.grey.shade300,
-                                width: 2,
-                              )
-                              : BorderSide.none,
+                      side: isTurnedIn
+                          ? BorderSide(color: Colors.grey.shade300, width: 2)
+                          : BorderSide.none,
                       padding: const EdgeInsets.symmetric(vertical: 20),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(16),
@@ -4774,14 +5503,16 @@ class _AssignmentInteractionScreenState
                     ),
                     child: Text(
                       isTurnedIn
-                          ? (undoLimitReached
-                              ? 'Final Submission'
-                              : 'Unsubmit Work')
+                          ? (isPastDue
+                                ? 'Submission Closed'
+                                : (undoLimitReached
+                                      ? 'Final Submission'
+                                      : 'Unsubmit Work'))
                           : (limitReached
-                              ? 'Limit Reached'
-                              : (attachedFiles.isEmpty
-                                  ? 'Mark as done'
-                                  : 'Turn In Final')),
+                                ? 'Limit Reached'
+                                : (attachedFiles.isEmpty
+                                      ? 'Mark as done'
+                                      : 'Turn In Final')),
                       style: const TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.bold,
@@ -4791,6 +5522,38 @@ class _AssignmentInteractionScreenState
                 ],
               );
             },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSubmissionClosedPanel() {
+    return Container(
+      padding: const EdgeInsets.all(32),
+      decoration: BoxDecoration(
+        color: Colors.red.shade50,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: Colors.red.shade200),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.lock_clock, size: 48, color: Colors.red.shade400),
+          const SizedBox(height: 16),
+          const Text(
+            'Submission Closed',
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+              color: Colors.red,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'The due date for this assignment has passed. No further submissions are allowed.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.red.shade700),
           ),
         ],
       ),
@@ -4878,10 +5641,9 @@ class _AssignmentInteractionScreenState
               ),
               borderRadius: BorderRadius.circular(24),
               border: Border.all(
-                color:
-                    (isFlagged || isTimedOut)
-                        ? Colors.red.shade200
-                        : Colors.green.shade200,
+                color: (isFlagged || isTimedOut)
+                    ? Colors.red.shade200
+                    : Colors.green.shade200,
               ),
               boxShadow: [
                 BoxShadow(
@@ -4903,10 +5665,11 @@ class _AssignmentInteractionScreenState
                     shape: BoxShape.circle,
                     boxShadow: [
                       BoxShadow(
-                        color: (isFlagged || isTimedOut
-                                ? Colors.red
-                                : Colors.green)
-                            .withAlpha(30),
+                        color:
+                            (isFlagged || isTimedOut
+                                    ? Colors.red
+                                    : Colors.green)
+                                .withAlpha(30),
                         blurRadius: 20,
                       ),
                     ],
@@ -4916,8 +5679,9 @@ class _AssignmentInteractionScreenState
                         ? Icons.report_problem
                         : (isTimedOut ? Icons.timer_off : Icons.check_circle),
                     size: 80,
-                    color:
-                        (isFlagged || isTimedOut) ? Colors.red : Colors.green,
+                    color: (isFlagged || isTimedOut)
+                        ? Colors.red
+                        : Colors.green,
                   ),
                 ),
                 const SizedBox(height: 32),
@@ -4925,8 +5689,8 @@ class _AssignmentInteractionScreenState
                   isFlagged
                       ? 'Test Terminated!'
                       : (isTimedOut
-                          ? 'Test is Over!'
-                          : 'Quiz Completed or Finished!'),
+                            ? 'Test is Over!'
+                            : 'Quiz Completed or Finished!'),
                   style: const TextStyle(
                     fontSize: 28,
                     fontWeight: FontWeight.bold,
@@ -4938,8 +5702,8 @@ class _AssignmentInteractionScreenState
                   isFlagged
                       ? 'This test was automatically terminated due to a security violation (tab switching or navigation).\nThis attempt has been flagged and submitted to your instructor.'
                       : (isTimedOut
-                          ? 'The deadline for this test has passed.\nYour progress was automatically saved and shared with your instructor.'
-                          : 'Your final answers were securely submitted to your instructor.\nYour score will be strictly visible to your teacher only.'),
+                            ? 'The deadline for this test has passed.\nYour progress was automatically saved and shared with your instructor.'
+                            : 'Your final answers were securely submitted to your instructor.\nYour score will be strictly visible to your teacher only.'),
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 16,
@@ -5082,11 +5846,10 @@ class _AssignmentInteractionScreenState
                       child: ElevatedButton(
                         onPressed: () async {
                           try {
-                            final statuses =
-                                await [
-                                  Permission.camera,
-                                  Permission.microphone,
-                                ].request();
+                            final statuses = await [
+                              Permission.camera,
+                              Permission.microphone,
+                            ].request();
 
                             // For platforms that do not support permission_handler, it might return permanentlyDenied or not return.
                             // However, we only block if explicitly denied.
@@ -5366,59 +6129,44 @@ class _AssignmentInteractionScreenState
                           ) {
                             bool isSelected =
                                 mcqAnswers[currentMcqIndex] == optIndex;
-                            String displayOptionText =
-                                q['options'][optIndex].toString();
+                            String displayOptionText = q['options'][optIndex]
+                                .toString();
 
                             return Padding(
                               padding: const EdgeInsets.only(bottom: 12),
                               child: InkWell(
-                                borderRadius: BorderRadius.circular(8),
-                                onTap: () async {
-                                  setState(
-                                    () =>
-                                        mcqAnswers[currentMcqIndex] = optIndex,
-                                  );
+                                onTap: () {
+                                  setState(() {
+                                    mcqAnswers[currentMcqIndex] = optIndex;
+                                  });
                                 },
-                                child: AnimatedContainer(
-                                  duration: const Duration(milliseconds: 200),
+                                borderRadius: BorderRadius.circular(16),
+                                child: Container(
                                   padding: const EdgeInsets.symmetric(
-                                    vertical: 16,
                                     horizontal: 24,
+                                    vertical: 20,
                                   ),
                                   decoration: BoxDecoration(
-                                    color: Colors.white,
-                                    border: Border(
-                                      left: BorderSide(
-                                        color:
-                                            isSelected
-                                                ? widget.classColor
-                                                : Colors.grey.shade200,
-                                        width: isSelected ? 4 : 1,
-                                      ),
-                                      top: BorderSide(
-                                        color: Colors.grey.shade100,
-                                        width: 1,
-                                      ),
-                                      right: BorderSide(
-                                        color: Colors.grey.shade100,
-                                        width: 1,
-                                      ),
-                                      bottom: BorderSide(
-                                        color: Colors.grey.shade100,
-                                        width: 1,
-                                      ),
+                                    color: isSelected
+                                        ? widget.classColor.withAlpha(20)
+                                        : Colors.white,
+                                    borderRadius: BorderRadius.circular(16),
+                                    border: Border.all(
+                                      color: isSelected
+                                          ? widget.classColor
+                                          : Colors.grey.shade200,
+                                      width: isSelected ? 2 : 1,
                                     ),
-                                    boxShadow:
-                                        isSelected
-                                            ? [
-                                              BoxShadow(
-                                                color: widget.classColor
-                                                    .withAlpha(15),
-                                                blurRadius: 24,
-                                                offset: const Offset(0, 4),
-                                              ),
-                                            ]
-                                            : [],
+                                    boxShadow: isSelected
+                                        ? [
+                                            BoxShadow(
+                                              color: widget.classColor
+                                                  .withAlpha(15),
+                                              blurRadius: 24,
+                                              offset: const Offset(0, 4),
+                                            ),
+                                          ]
+                                        : [],
                                   ),
                                   child: Row(
                                     mainAxisAlignment:
@@ -5429,14 +6177,12 @@ class _AssignmentInteractionScreenState
                                           displayOptionText,
                                           style: TextStyle(
                                             fontSize: 18,
-                                            fontWeight:
-                                                isSelected
-                                                    ? FontWeight.bold
-                                                    : FontWeight.w500,
-                                            color:
-                                                isSelected
-                                                    ? const Color(0xFF4A4A68)
-                                                    : Colors.grey.shade600,
+                                            fontWeight: isSelected
+                                                ? FontWeight.bold
+                                                : FontWeight.w500,
+                                            color: isSelected
+                                                ? const Color(0xFF4A4A68)
+                                                : Colors.grey.shade600,
                                           ),
                                         ),
                                       ),
@@ -5446,26 +6192,24 @@ class _AssignmentInteractionScreenState
                                         decoration: BoxDecoration(
                                           shape: BoxShape.circle,
                                           border: Border.all(
-                                            color:
-                                                isSelected
-                                                    ? widget.classColor
-                                                    : Colors.black87,
+                                            color: isSelected
+                                                ? widget.classColor
+                                                : Colors.black87,
                                             width: 2,
                                           ),
                                         ),
-                                        child:
-                                            isSelected
-                                                ? Center(
-                                                  child: Container(
-                                                    width: 12,
-                                                    height: 12,
-                                                    decoration: BoxDecoration(
-                                                      shape: BoxShape.circle,
-                                                      color: widget.classColor,
-                                                    ),
+                                        child: isSelected
+                                            ? Center(
+                                                child: Container(
+                                                  width: 12,
+                                                  height: 12,
+                                                  decoration: BoxDecoration(
+                                                    shape: BoxShape.circle,
+                                                    color: widget.classColor,
                                                   ),
-                                                )
-                                                : null,
+                                                ),
+                                              )
+                                            : null,
                                       ),
                                     ],
                                   ),
@@ -5611,10 +6355,14 @@ class _AssignmentInteractionScreenState
                           color: Colors.black54,
                           borderRadius: BorderRadius.circular(4),
                         ),
-                        child: const Row(
+                        child: Row(
                           children: [
-                            Icon(Icons.circle, color: Colors.red, size: 8),
-                            SizedBox(width: 4),
+                            const Icon(
+                              Icons.circle,
+                              color: Colors.red,
+                              size: 8,
+                            ),
+                            const SizedBox(width: 4),
                             const Text(
                               'LIVE',
                               style: TextStyle(
@@ -5692,11 +6440,16 @@ class _AssignmentInteractionScreenState
   }
 
   Widget _buildTeacherReviewPanel() {
-    bool isTurnedIn =
-        (widget.assignment['isDone'] ?? false) &&
-        !(widget.assignment['isMissed'] ?? false);
     bool isMcq = widget.assignment['mcqData'] != null;
-    int? score = AppData().mcqScores[widget.assignment['id']];
+
+    // Calculate stats from currentAssignmentStatuses
+    int turnedInCount = 0;
+    int flaggedCount = 0;
+
+    for (var status in AppData().currentAssignmentStatuses.values) {
+      if (status['is_done'] == true) turnedInCount++;
+      if (status['is_flagged'] == true) flaggedCount++;
+    }
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -5745,8 +6498,8 @@ class _AssignmentInteractionScreenState
           children: [
             Expanded(
               child: _buildModernStatCard(
-                'Turned in',
-                isTurnedIn ? '1' : '0',
+                'Turned In',
+                turnedInCount.toString(),
                 Icons.check_circle,
                 Colors.green,
               ),
@@ -5755,7 +6508,7 @@ class _AssignmentInteractionScreenState
             Expanded(
               child: _buildModernStatCard(
                 'Assigned',
-                '25',
+                AppData().registeredStudents.length.toString(),
                 Icons.people,
                 Colors.blue,
               ),
@@ -5765,9 +6518,7 @@ class _AssignmentInteractionScreenState
               Expanded(
                 child: _buildModernStatCard(
                   'Flagged',
-                  AppData().mcqFlagged[widget.assignment['id']] == true
-                      ? '1'
-                      : '0',
+                  flaggedCount.toString(),
                   Icons.report_problem,
                   Colors.red,
                 ),
@@ -5777,7 +6528,7 @@ class _AssignmentInteractionScreenState
         ),
         const SizedBox(height: 32),
         Text(
-          'Student Roster',
+          'Student Details',
           style: GoogleFonts.outfit(
             fontWeight: FontWeight.bold,
             fontSize: 18,
@@ -5785,11 +6536,40 @@ class _AssignmentInteractionScreenState
           ),
         ),
         const SizedBox(height: 16),
-        _buildStudentRosterItem('Student 1', isTurnedIn, isMcq, score),
-        _buildStudentRosterItem('Student 2', false, isMcq, null),
-        _buildStudentRosterItem('Student 3', false, isMcq, null),
-        _buildStudentRosterItem('Student 4', false, isMcq, null),
-        _buildStudentRosterItem('Student 5', false, isMcq, null),
+        if (AppData().registeredStudents.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 20),
+            child: Center(
+              child: Text(
+                'No students found',
+                style: TextStyle(color: Colors.grey),
+              ),
+            ),
+          )
+        else
+          ...AppData().registeredStudents.map((student) {
+            String name = student['name'] ?? 'Unknown Student';
+            // Try all possible student ID fields and normalize to string
+            String? eNo = student['enrollno']?.toString();
+            String? eNoAlt = student['Enrollment No']?.toString();
+            String stdId = (eNo != null && eNo.isNotEmpty)
+                ? eNo
+                : (eNoAlt ?? '');
+
+            final status = AppData().currentAssignmentStatuses[stdId];
+            bool hasSubmitted = status?['is_done'] ?? false;
+            int? studentScore = status?['mcq_score'];
+            bool isStudentFlagged = status?['is_flagged'] ?? false;
+
+            return _buildStudentRosterItem(
+              name,
+              stdId,
+              hasSubmitted,
+              isMcq,
+              studentScore,
+              isFlagged: isStudentFlagged,
+            );
+          }),
         const SizedBox(height: 100), // Visual padding at bottom
       ],
     );
@@ -5797,13 +6577,12 @@ class _AssignmentInteractionScreenState
 
   Widget _buildStudentRosterItem(
     String name,
+    String stdId,
     bool hasSubmitted,
     bool isMcq,
-    int? score,
-  ) {
-    bool isFlagged =
-        name == 'Student 1' &&
-        (AppData().mcqFlagged[widget.assignment['id']] ?? false);
+    int? score, {
+    bool isFlagged = false,
+  }) {
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
@@ -5822,8 +6601,9 @@ class _AssignmentInteractionScreenState
         contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
         leading: CircleAvatar(
           radius: 24,
-          backgroundColor:
-              hasSubmitted ? Colors.blue.shade50 : Colors.red.shade50,
+          backgroundColor: hasSubmitted
+              ? Colors.blue.shade50
+              : Colors.red.shade50,
           child: Icon(
             Icons.person,
             color: hasSubmitted ? Colors.blue : Colors.red,
@@ -5846,10 +6626,9 @@ class _AssignmentInteractionScreenState
               Text(
                 hasSubmitted ? 'Turned in' : 'Not Attended',
                 style: TextStyle(
-                  color:
-                      hasSubmitted
-                          ? Colors.green.shade700
-                          : Colors.red.shade700,
+                  color: hasSubmitted
+                      ? Colors.green.shade700
+                      : Colors.red.shade700,
                   fontWeight: FontWeight.w500,
                 ),
               ),
@@ -5925,168 +6704,80 @@ class _AssignmentInteractionScreenState
             ],
           ),
         ),
-        trailing:
-            hasSubmitted && isMcq && score != null
-                ? Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 8,
-                      ),
-                      decoration: BoxDecoration(
-                        color: widget.classColor.withAlpha(20),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(
-                          color: widget.classColor.withAlpha(50),
-                        ),
-                      ),
-                      child: Text(
-                        '$score Marks',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          color: widget.classColor,
-                          fontSize: 14,
-                        ),
+        trailing: hasSubmitted && isMcq && score != null
+            ? Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.shade50,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(
+                      Icons.description,
+                      color: Colors.blue,
+                      size: 20,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: widget.classColor.withAlpha(20),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: widget.classColor.withAlpha(50),
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    IconButton(
-                      icon: const Icon(Icons.download, color: Colors.black54),
-                      onPressed: () {
-                        final answers =
-                            AppData().mcqStudentAnswers[widget
-                                .assignment['id']];
-                        showDialog(
-                          context: context,
-                          builder:
-                              (ctx) => AlertDialog(
-                                title: const Text(
-                                  'Student Answers & Download Report',
-                                ),
-                                content: SizedBox(
-                                  width: 400,
-                                  height: 300,
-                                  child: ListView.builder(
-                                    itemCount:
-                                        widget.assignment['mcqData'].length,
-                                    itemBuilder: (c, i) {
-                                      var q = widget.assignment['mcqData'][i];
-                                      var ansIndex = answers?[i];
-                                      String ansText =
-                                          ansIndex != null
-                                              ? q['options'][ansIndex]
-                                                  .toString()
-                                              : 'No Answer Selected';
-                                      return ListTile(
-                                        title: Text(
-                                          'Q${i + 1}: ${q['question']}',
-                                        ),
-                                        subtitle: Text('Selected: $ansText'),
-                                      );
-                                    },
-                                  ),
-                                ),
-                                actions: [
-                                  TextButton(
-                                    onPressed: () => Navigator.pop(ctx),
-                                    child: const Text('Close'),
-                                  ),
-                                  ElevatedButton.icon(
-                                    icon: const Icon(Icons.table_chart),
-                                    label: const Text('Export as Excel'),
-                                    onPressed: () {
-                                      Navigator.pop(ctx);
-                                      ScaffoldMessenger.of(
-                                        context,
-                                      ).showSnackBar(
-                                        SnackBar(
-                                          content: Text(
-                                            '${name.replaceAll(" ", "_")}_Results.xlsx downloaded successfully!',
-                                          ),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                ],
-                              ),
-                        );
-                      },
+                    child: Text(
+                      '$score Marks',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: widget.classColor,
+                        fontSize: 14,
+                      ),
                     ),
-                  ],
-                )
-                : (hasSubmitted && !isMcq)
-                ? IconButton(
-                  icon: const Icon(Icons.folder_open, color: Colors.blue),
-                  onPressed: () {
-                    List<PlatformFile> files =
-                        AppData().assignmentSubmissions[widget
-                            .assignment['id']] ??
-                        [];
-                    showDialog(
-                      context: context,
-                      builder:
-                          (ctx) => AlertDialog(
-                            title: Text('$name\'s Submission'),
-                            content: SizedBox(
-                              width: 400,
-                              child:
-                                  files.isEmpty
-                                      ? const Text(
-                                        'No files submitted manually.',
-                                      )
-                                      : Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children:
-                                            files
-                                                .map(
-                                                  (f) => ListTile(
-                                                    leading: const Icon(
-                                                      Icons.file_present,
-                                                    ),
-                                                    title: Text(f.name),
-                                                    trailing: Text(
-                                                      '${(f.size / 1024).toStringAsFixed(1)} KB',
-                                                    ),
-                                                    onTap: () {
-                                                      Navigator.pop(ctx);
-                                                      ScaffoldMessenger.of(
-                                                        context,
-                                                      ).showSnackBar(
-                                                        SnackBar(
-                                                          content: Text(
-                                                            'Opening ${f.name}...',
-                                                          ),
-                                                        ),
-                                                      );
-                                                    },
-                                                  ),
-                                                )
-                                                .toList(),
-                                      ),
-                            ),
-                            actions: [
-                              TextButton(
-                                onPressed: () => Navigator.pop(ctx),
-                                child: const Text('Close'),
-                              ),
-                            ],
-                          ),
+                  ),
+                ],
+              )
+            : (hasSubmitted && !isMcq)
+            ? IconButton(
+                icon: const Icon(Icons.folder_open, color: Colors.blue),
+                onPressed: () async {
+                  final status = AppData().currentAssignmentStatuses[stdId];
+                  String fileName = status?['file_name'] ?? 'submission.pdf';
+                  final assignmentId = widget.assignment['id'];
+
+                  final storagePath = '$assignmentId/$stdId/$fileName';
+                  final String publicUrl = supabase.storage
+                      .from('student-submissions')
+                      .getPublicUrl(storagePath);
+
+                  final Uri uri = Uri.parse(publicUrl);
+                  if (await canLaunchUrl(uri)) {
+                    await launchUrl(uri, mode: LaunchMode.externalApplication);
+                  } else {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Could not open file URL')),
                     );
-                  },
-                )
-                : Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: Colors.grey.shade100,
-                  ),
-                  child: Icon(
-                    hasSubmitted ? Icons.attachment : Icons.close,
-                    color: Colors.grey,
-                  ),
+                  }
+                },
+              )
+            : Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.grey.shade100,
                 ),
+                child: Icon(
+                  hasSubmitted ? Icons.attachment : Icons.close,
+                  color: Colors.grey,
+                ),
+              ),
       ),
     );
   }

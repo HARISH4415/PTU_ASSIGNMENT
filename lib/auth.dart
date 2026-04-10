@@ -28,20 +28,19 @@ class _LoginScreenState extends State<LoginScreen> {
       return;
     }
 
-    bool success = false;
-
-    // Check if it's a teacher login (usually teacher IDs might have a specific prefix or be in teacher_int)
-    // We try to login as teacher first, if that fails with 'user not found' logic, we try student.
-    // Or simpler: try both, but here we can check if it looks like a teacher ID or if the user typed something specific.
-    // For now, let's try teacher login first, then student.
-    success = await AppData().loginTeacher(id, pass);
+    bool success = await AppData().loginStudent(id, pass);
+    
     if (!success) {
-      success = await AppData().loginStudent(id, pass);
+      // If not a student, try as a teacher
+      success = await AppData().loginTeacher(id, pass);
     }
 
     if (success) {
-      // Navigation is handled automatically by the App Shell (PTU_PORTALApp)
-      // which listens to AppData changes via AnimatedBuilder.
+      if (!mounted) return;
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const MainLayoutScreen()),
+      );
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Invalid credentials or user not found')),
@@ -235,6 +234,7 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
     text: AppData().loggedName,
   );
   final TextEditingController _phoneController = TextEditingController();
+  final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passController = TextEditingController();
   bool _isLoading = false;
   bool _isPasswordVisible = false;
@@ -312,6 +312,7 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
         year: _selectedYear ?? '',
         semester: _selectedSemester ?? '',
         section: _selectedSection ?? '',
+        email: _emailController.text.trim(),
         password: _passController.text.trim(),
       );
       setState(() => _isLoading = false);
@@ -408,6 +409,23 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
                     validator: (v) {
                       if (v == null || v.isEmpty) return 'Required';
                       if (v.length != 10) return 'Enter a valid 10-digit number';
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Email
+                  _buildRegLabel('Email Address'),
+                  TextFormField(
+                    controller: _emailController,
+                    keyboardType: TextInputType.emailAddress,
+                    decoration: _inputDeco(
+                      Icons.email_outlined,
+                      hint: 'e.g. student@ptu.edu',
+                    ),
+                    validator: (v) {
+                      if (v == null || v.isEmpty) return 'Required';
+                      if (!v.contains('@')) return 'Enter a valid email';
                       return null;
                     },
                   ),
@@ -644,13 +662,15 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
     text: AppData().loggedName,
   );
   final TextEditingController _phoneController = TextEditingController();
-  final TextEditingController _emailController = TextEditingController();
-  final TextEditingController _designationController = TextEditingController();
+  final TextEditingController _emailController = TextEditingController(
+    text: AppData().loggedEmail,
+  );
   final TextEditingController _passController = TextEditingController();
   bool _isLoading = false;
   bool _isPasswordVisible = false;
 
   String? _selectedDepartment;
+  String? _selectedDesignation;
 
   final List<String> _departments = [
     'Computer Science & Engineering',
@@ -659,10 +679,16 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
     'Electrical Engineering',
     'Mechanical Engineering',
     'Civil Engineering',
-    'Chemical Engineering',
-    'Biotechnology',
-    'Mathematics & Computing',
     'Physics',
+    'Mathematics',
+  ];
+
+  final List<String> _designations = [
+    'Assistant Professor',
+    'Associate Professor',
+    'Professor',
+    'Head of Department',
+    'Lab Assistant',
   ];
 
   Future<void> _handleRegister() async {
@@ -674,7 +700,7 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
         phone: _phoneController.text.trim(),
         email: _emailController.text.trim(),
         department: _selectedDepartment ?? '',
-        designation: _designationController.text.trim(),
+        designation: _selectedDesignation ?? '',
         password: _passController.text.trim(),
       );
       setState(() => _isLoading = false);
@@ -682,10 +708,7 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
       if (errorMessage != null) {
         if (!context.mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Registration failed: $errorMessage'),
-            duration: const Duration(seconds: 5),
-          ),
+          SnackBar(content: Text('Registration failed: $errorMessage')),
         );
       }
     }
@@ -709,12 +732,12 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
                     child: Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
-                        color: Colors.indigo.withAlpha(30),
+                        color: Colors.amber.shade100,
                         shape: BoxShape.circle,
                       ),
-                      child: const Icon(
-                        Icons.person_add_rounded,
-                        color: Colors.indigo,
+                      child: Icon(
+                        Icons.person_add_alt_1_rounded,
+                        color: Colors.amber.shade800,
                         size: 40,
                       ),
                     ),
@@ -730,7 +753,7 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'Welcome, Prof. ${AppData().loggedName ?? ''}! Please complete your profile.',
+                    'Welcome, ${AppData().loggedName ?? 'Teacher'}! Please complete your profile.',
                     textAlign: TextAlign.center,
                     style: TextStyle(color: Colors.grey.shade600),
                   ),
@@ -740,14 +763,14 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
                   TextFormField(
                     initialValue: AppData().loggedTeacherId,
                     enabled: false,
-                    decoration: _inputDeco(Icons.assignment_ind),
+                    decoration: _inputDecoIcon(Icons.badge_outlined),
                   ),
                   const SizedBox(height: 16),
 
                   _buildRegLabel('Full Name'),
                   TextFormField(
                     controller: _nameController,
-                    decoration: _inputDeco(Icons.person_outline),
+                    decoration: _inputDecoIcon(Icons.person_outline),
                     validator: (v) => v!.isEmpty ? 'Required' : null,
                   ),
                   const SizedBox(height: 16),
@@ -755,56 +778,58 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
                   _buildRegLabel('Email Address'),
                   TextFormField(
                     controller: _emailController,
-                    keyboardType: TextInputType.emailAddress,
-                    decoration: _inputDeco(Icons.email_outlined, hint: 'e.g. teacher@university.edu'),
-                    validator: (v) => v!.isEmpty || !v.contains('@') ? 'Invalid email' : null,
+                    decoration: _inputDecoIcon(Icons.email_outlined),
+                    validator: (v) => v!.isEmpty ? 'Required' : null,
                   ),
                   const SizedBox(height: 16),
 
                   _buildRegLabel('Phone Number'),
                   TextFormField(
                     controller: _phoneController,
-                    keyboardType: TextInputType.phone,
                     maxLength: 10,
-                    decoration: _inputDeco(Icons.phone_outlined, hint: 'e.g. 9876543210'),
-                    validator: (v) => v!.length != 10 ? 'Enter 10-digit number' : null,
-                  ),
-                  const SizedBox(height: 8),
-
-                  _buildRegLabel('Department'),
-                  DropdownButtonFormField<String>(
-                    value: _selectedDepartment,
-                    decoration: _inputDeco(Icons.account_balance_outlined),
-                    hint: const Text('Select Department'),
-                    isExpanded: true,
-                    items: _departments.map((d) => DropdownMenuItem(value: d, child: Text(d))).toList(),
-                    onChanged: (val) => setState(() => _selectedDepartment = val),
-                    validator: (v) => v == null ? 'Please select' : null,
-                  ),
-                  const SizedBox(height: 16),
-
-                  _buildRegLabel('Designation'),
-                  TextFormField(
-                    controller: _designationController,
-                    decoration: _inputDeco(Icons.work_outline, hint: 'e.g. Assistant Professor'),
+                    decoration: _inputDecoIcon(Icons.phone_outlined),
                     validator: (v) => v!.isEmpty ? 'Required' : null,
                   ),
                   const SizedBox(height: 16),
 
-                  _buildRegLabel('Create New Password'),
+                  _buildRegLabel('Department'),
+                  DropdownButtonFormField<String>(
+                    value: _selectedDepartment,
+                    decoration: _inputDecoIcon(Icons.account_balance_outlined),
+                    items: _departments
+                        .map((d) => DropdownMenuItem(value: d, child: Text(d)))
+                        .toList(),
+                    onChanged: (v) => setState(() => _selectedDepartment = v),
+                    validator: (v) => v == null ? 'Required' : null,
+                  ),
+                  const SizedBox(height: 16),
+
+                  _buildRegLabel('Designation'),
+                  DropdownButtonFormField<String>(
+                    value: _selectedDesignation,
+                    decoration: _inputDecoIcon(Icons.work_outline),
+                    items: _designations
+                        .map((d) => DropdownMenuItem(value: d, child: Text(d)))
+                        .toList(),
+                    onChanged: (v) => setState(() => _selectedDesignation = v),
+                    validator: (v) => v == null ? 'Required' : null,
+                  ),
+                  const SizedBox(height: 16),
+
+                  _buildRegLabel('Create Password'),
                   TextFormField(
                     controller: _passController,
                     obscureText: !_isPasswordVisible,
-                    decoration: _inputDeco(Icons.lock_outline).copyWith(
+                    decoration: _inputDecoIcon(Icons.lock_outline).copyWith(
                       suffixIcon: IconButton(
-                        icon: Icon(
-                          _isPasswordVisible ? Icons.visibility : Icons.visibility_off,
-                          size: 20,
-                        ),
-                        onPressed: () => setState(() => _isPasswordVisible = !_isPasswordVisible),
+                        icon: Icon(_isPasswordVisible
+                            ? Icons.visibility
+                            : Icons.visibility_off),
+                        onPressed: () => setState(
+                            () => _isPasswordVisible = !_isPasswordVisible),
                       ),
                     ),
-                    validator: (v) => v!.length < 6 ? 'Minimum 6 characters' : null,
+                    validator: (v) => v!.length < 6 ? 'Min 6 chars' : null,
                   ),
                   const SizedBox(height: 32),
 
@@ -814,11 +839,14 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
                       backgroundColor: const Color(0xFF6C5CE7),
                       foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(vertical: 20),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
                     ),
                     child: _isLoading
                         ? const CircularProgressIndicator(color: Colors.white)
-                        : const Text('Finalize Registration', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                        : const Text('Complete Registration',
+                            style: TextStyle(
+                                fontSize: 16, fontWeight: FontWeight.bold)),
                   ),
                   const SizedBox(height: 16),
                   TextButton(
@@ -837,13 +865,13 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
   Widget _buildRegLabel(String text) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 6.0, left: 4),
-      child: Text(text, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+      child: Text(text,
+          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
     );
   }
 
-  InputDecoration _inputDeco(IconData icon, {String? hint}) {
+  InputDecoration _inputDecoIcon(IconData icon) {
     return InputDecoration(
-      hintText: hint,
       prefixIcon: Icon(icon, size: 20),
       border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
