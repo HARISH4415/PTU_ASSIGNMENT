@@ -11,6 +11,8 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:excel/excel.dart' as ex;
+import 'dart:typed_data';
 import 'auth.dart';
 
 List<CameraDescription> cameras = [];
@@ -202,6 +204,7 @@ class AppData extends ChangeNotifier {
             isDone: true,
             isFlagged: isFlagged,
             score: score,
+            answers: answers,
             isMcq: true,
           );
           return;
@@ -215,6 +218,7 @@ class AppData extends ChangeNotifier {
     bool isDone = false,
     bool isFlagged = false,
     int? score,
+    Map<int, int>? answers,
     bool isMcq = false,
   }) async {
     try {
@@ -227,6 +231,7 @@ class AppData extends ChangeNotifier {
           'score': score ?? 0,
           'is_completed': isDone,
           'is_flagged': isFlagged,
+          'student_answers': answers,
         }, onConflict: 'student_id, mcq_id');
       } else {
         String? fName;
@@ -306,6 +311,7 @@ class AppData extends ChangeNotifier {
           'mcq_score': isMcq ? row['score'] : null,
           'is_flagged': isMcq ? (row['is_flagged'] ?? false) : false,
           'file_name': isMcq ? null : row['submission_file_name'],
+          'answers': isMcq ? row['student_answers'] : null,
         };
       }
       currentAssignmentStatuses = statuses;
@@ -616,6 +622,7 @@ class AppData extends ChangeNotifier {
     PlatformFile? file,
     List<dynamic>? mcqData,
     int timePerQuestion = 30,
+    int? questionsToShow,
     DateTime? startDateTime,
     DateTime? dueDateTime,
   }) async {
@@ -631,6 +638,7 @@ class AppData extends ChangeNotifier {
       'instructorFileName': file?.name,
       'mcqData': mcqData,
       'timePerQuestion': timePerQuestion,
+      'questionsToShow': questionsToShow,
       'isDone': false,
     };
     classAssignments.putIfAbsent(classId, () => []).insert(0, assignment);
@@ -647,6 +655,7 @@ class AppData extends ChangeNotifier {
           'start_datetime': startDateTime?.toIso8601String(),
           'mcq_data': mcqData,
           'time_per_question': timePerQuestion,
+          'random_question_count': questionsToShow,
         });
       } else {
         // UPLOAD TEACHER FILE IF EXISTS
@@ -753,6 +762,7 @@ class AppData extends ChangeNotifier {
         'instructorFileName': row['instructor_file_name'],
         'mcqData': row['mcq_data'],
         'timePerQuestion': row['time_per_question'] ?? 30,
+        'questionsToShow': row['random_question_count'],
         'isDone': false,
       });
     }
@@ -1322,7 +1332,7 @@ class _McqCentralViewState extends State<McqCentralView> {
                                         ),
                                         const SizedBox(height: 4),
                                         Text(
-                                          '${cls['title']}\nStart: ${a['startDateTime']?.toString().substring(0, 16) ?? 'N/A'}  •  End: ${a['dueDateTime']?.toString().substring(0, 16) ?? a['dueDate']}  •  ${a['mcqData'].length} Questions',
+                                          '${cls['title']}\nStart: ${a['startDateTime']?.toString().substring(0, 16) ?? 'N/A'}  •  End: ${a['dueDateTime']?.toString().substring(0, 16) ?? a['dueDate']}  •  ${a['questionsToShow'] ?? a['mcqData'].length} Questions${a['questionsToShow'] != null ? ' (Randomly selected from ${a['mcqData'].length})' : ''}',
                                           style: TextStyle(
                                             color: Colors.grey.shade600,
                                           ),
@@ -1416,6 +1426,7 @@ class _McqCentralViewState extends State<McqCentralView> {
   void _openCreateMcqTestDialog(BuildContext context) {
     TextEditingController titleCtrl = TextEditingController();
     TextEditingController timeCtrl = TextEditingController(text: '30');
+    TextEditingController randomCountCtrl = TextEditingController();
     DateTime startDateTime = DateTime.now();
     DateTime endDateTime = DateTime.now().add(const Duration(minutes: 30));
     String? selectedClassId = AppData().filteredClasses.isNotEmpty
@@ -1430,7 +1441,11 @@ class _McqCentralViewState extends State<McqCentralView> {
           builder: (ctx, setDialogState) {
             int qCount = mcqData?.length ?? 0;
             int timePerQ = int.tryParse(timeCtrl.text) ?? 30;
-            int totalSeconds = qCount * timePerQ;
+
+            int showCount = int.tryParse(randomCountCtrl.text) ?? qCount;
+            if (showCount <= 0 || showCount > qCount) showCount = qCount;
+
+            int totalSeconds = showCount * timePerQ;
             String totalTimeStr =
                 '${totalSeconds ~/ 60}m ${totalSeconds % 60}s';
 
@@ -1449,6 +1464,22 @@ class _McqCentralViewState extends State<McqCentralView> {
                           labelText: 'MCQ Test Title',
                           border: OutlineInputBorder(),
                         ),
+                      ),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: randomCountCtrl,
+                        decoration: InputDecoration(
+                          labelText: 'Questions to randomly select',
+                          border: const OutlineInputBorder(),
+                          hintText: qCount > 0
+                              ? 'Max: $qCount'
+                              : 'Upload JSON first',
+                          helperText: qCount > 0
+                              ? 'Leave empty to share all $qCount questions'
+                              : null,
+                        ),
+                        keyboardType: TextInputType.number,
+                        onChanged: (val) => setDialogState(() {}),
                       ),
                       const SizedBox(height: 16),
                       ListTile(
@@ -1585,7 +1616,22 @@ class _McqCentralViewState extends State<McqCentralView> {
                         mcqData != null) {
                       int qCount = mcqData?.length ?? 0;
                       int timePerQ = int.tryParse(timeCtrl.text) ?? 30;
-                      int totalSeconds = qCount * timePerQ;
+
+                      int? questionsToShow = int.tryParse(randomCountCtrl.text);
+                      if (questionsToShow != null &&
+                          (questionsToShow <= 0 || questionsToShow > qCount)) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              'Invalid number of questions to select. Must be between 1 and $qCount.',
+                            ),
+                          ),
+                        );
+                        return;
+                      }
+
+                      int effectiveShowCount = questionsToShow ?? qCount;
+                      int totalSeconds = effectiveShowCount * timePerQ;
                       if (endDateTime.difference(startDateTime).inSeconds <
                           totalSeconds) {
                         ScaffoldMessenger.of(context).showSnackBar(
@@ -1603,6 +1649,7 @@ class _McqCentralViewState extends State<McqCentralView> {
                         endDateTime.toString().substring(0, 16),
                         mcqData: mcqData,
                         timePerQuestion: timePerQ,
+                        questionsToShow: questionsToShow,
                         startDateTime: startDateTime,
                         dueDateTime: endDateTime,
                       );
@@ -1610,7 +1657,6 @@ class _McqCentralViewState extends State<McqCentralView> {
                       setState(() {}); // refresh global list
                     }
                   },
-
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF6C5CE7),
                     foregroundColor: Colors.white,
@@ -4851,7 +4897,10 @@ class _AssignmentInteractionScreenState
   }
 
   void _moveToNextQuestionOrSubmit() {
-    List<dynamic> mcqData = widget.assignment['mcqData'] as List<dynamic>;
+    List<dynamic> mcqData = _shuffledMcqData.isNotEmpty
+        ? _shuffledMcqData
+        : (widget.assignment['mcqData'] as List<dynamic>);
+
     if (currentMcqIndex < mcqData.length - 1) {
       currentMcqIndex++;
       _startMcqTimer();
@@ -4864,13 +4913,13 @@ class _AssignmentInteractionScreenState
   void _shuffleQuestionsAndOptions() {
     final originalData = widget.assignment['mcqData'] as List<dynamic>;
     // Create a deep-ish copy to avoid modifying original ref
-    _shuffledMcqData = originalData
+    List<dynamic> workingData = originalData
         .map((q) => Map<String, dynamic>.from(q))
         .toList();
 
     final random = Random();
 
-    for (var q in _shuffledMcqData) {
+    for (var q in workingData) {
       if (q['options'] is List) {
         List options = List.from(q['options']);
         // Identify correct answer before shuffling
@@ -4911,7 +4960,17 @@ class _AssignmentInteractionScreenState
     }
 
     // Shuffle questions
-    _shuffledMcqData.shuffle(random);
+    workingData.shuffle(random);
+
+    // Take subset if requested
+    int? questionsToShow = widget.assignment['questionsToShow'];
+    if (questionsToShow != null &&
+        questionsToShow > 0 &&
+        questionsToShow < workingData.length) {
+      _shuffledMcqData = workingData.take(questionsToShow).toList();
+    } else {
+      _shuffledMcqData = workingData;
+    }
   }
 
   void _submitMcq({bool isFlagged = false}) {
@@ -6467,16 +6526,7 @@ class _AssignmentInteractionScreenState
             ),
             if (isMcq)
               ElevatedButton.icon(
-                onPressed: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                        'Downloading Student MCQ Results as PDF...',
-                      ),
-                      backgroundColor: Color(0xFF6C5CE7),
-                    ),
-                  );
-                },
+                onPressed: () => _showAllResultsSummaryDialog(context),
                 icon: const Icon(Icons.download_rounded),
                 label: const Text('Download All Details'),
                 style: ElevatedButton.styleFrom(
@@ -6708,16 +6758,35 @@ class _AssignmentInteractionScreenState
             ? Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: Colors.blue.shade50,
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: const Icon(
-                      Icons.description,
-                      color: Colors.blue,
-                      size: 20,
+                  InkWell(
+                    onTap: () {
+                      final status = AppData().currentAssignmentStatuses[stdId];
+                      if (status != null && status['answers'] != null) {
+                        _showStudentAnswersDialog(
+                          context,
+                          name,
+                          status['answers'],
+                        );
+                      } else {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('No answers found for this student.'),
+                          ),
+                        );
+                      }
+                    },
+                    borderRadius: BorderRadius.circular(8),
+                    child: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.blue.shade50,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Icon(
+                        Icons.description,
+                        color: Colors.blue,
+                        size: 20,
+                      ),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -6853,6 +6922,357 @@ class _AssignmentInteractionScreenState
         const SizedBox(height: 4),
         Text(label, style: const TextStyle(fontWeight: FontWeight.w500)),
       ],
+    );
+  }
+
+  void _showStudentAnswersDialog(
+    BuildContext context,
+    String studentName,
+    dynamic answers,
+  ) {
+    final Map<int, int> studentAnsMap = {};
+    if (answers is Map) {
+      answers.forEach((k, v) {
+        studentAnsMap[int.tryParse(k.toString()) ?? 0] =
+            int.tryParse(v.toString()) ?? 0;
+      });
+    }
+    final originalMcqData = widget.assignment['mcqData'] as List<dynamic>;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Answers for $studentName'),
+        content: SizedBox(
+          width: 500,
+          height: 600,
+          child: ListView.builder(
+            itemCount: originalMcqData.length,
+            itemBuilder: (context, i) {
+              final q = originalMcqData[i];
+              final correctIdx = q['answerIndex'] ?? 0;
+              final studentIdx = studentAnsMap[i];
+              final isCorrect = studentIdx == correctIdx;
+
+              return Card(
+                color: Colors.white,
+                margin: const EdgeInsets.only(bottom: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: BorderSide(color: Colors.grey.shade200),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Q${i + 1}: ${q['question'] ?? "N/A"}',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: Colors.green.shade50,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.check_circle,
+                              color: Colors.green,
+                              size: 16,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                'Correct: ${q['options']?[correctIdx] ?? "N/A"}',
+                                style: const TextStyle(
+                                  color: Colors.green,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: isCorrect
+                              ? Colors.green.shade50
+                              : Colors.red.shade50,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              isCorrect ? Icons.check_circle : Icons.cancel,
+                              color: isCorrect ? Colors.green : Colors.red,
+                              size: 16,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                'Student Selected: ${studentIdx != null ? (q['options']?[studentIdx] ?? "N/A") : "Not Answered"}',
+                                style: TextStyle(
+                                  color: isCorrect ? Colors.green : Colors.red,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showAllResultsSummaryDialog(BuildContext context) {
+    final allStudents = AppData().registeredStudents;
+    final statuses = AppData().currentAssignmentStatuses;
+    final originalMcqData = widget.assignment['mcqData'] as List<dynamic>;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('All Students MCQ Summary'),
+        content: SizedBox(
+          width: 800,
+          height: 600,
+          child: SingleChildScrollView(
+            child: DataTable(
+              horizontalMargin: 12,
+              columnSpacing: 16,
+              columns: const [
+                DataColumn(
+                  label: Text(
+                    'Student',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+                DataColumn(
+                  label: Text(
+                    'Status',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+                DataColumn(
+                  label: Text(
+                    'Ans/Skip',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+                DataColumn(
+                  label: Text(
+                    'Score',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+                DataColumn(
+                  label: Text(
+                    'Flagged',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+                DataColumn(
+                  label: Text(
+                    'Details',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+              rows: allStudents.map((student) {
+                String name = student['name'] ?? 'Unknown';
+                String? eNo = student['enrollno']?.toString();
+                String? eNoAlt = student['Enrollment No']?.toString();
+                String stdId = (eNo != null && eNo.isNotEmpty)
+                    ? eNo
+                    : (eNoAlt ?? '');
+
+                final status = statuses[stdId];
+                bool hasSubmitted = status?['is_done'] ?? false;
+                int? score = status?['mcq_score'];
+                bool isFlagged = status?['is_flagged'] ?? false;
+
+                final Map<dynamic, dynamic>? answers = status?['answers'];
+                int answeredCount = answers?.length ?? 0;
+                int totalQuestions = originalMcqData.length;
+                int skippedCount = hasSubmitted
+                    ? (totalQuestions - answeredCount)
+                    : 0;
+
+                return DataRow(
+                  cells: [
+                    DataCell(Text(name, style: const TextStyle(fontSize: 12))),
+                    DataCell(
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: hasSubmitted
+                              ? Colors.green.shade50
+                              : Colors.orange.shade50,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Text(
+                          hasSubmitted ? 'Submitted' : 'Pending',
+                          style: TextStyle(
+                            color: hasSubmitted ? Colors.green : Colors.orange,
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+                    DataCell(
+                      Text(
+                        hasSubmitted ? '$answeredCount / $skippedCount' : '-',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ),
+                    DataCell(
+                      Text(
+                        score != null ? '$score / $totalQuestions' : '-',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ),
+                    DataCell(
+                      Text(
+                        isFlagged ? 'YES' : 'NO',
+                        style: TextStyle(
+                          color: isFlagged ? Colors.red : Colors.black,
+                          fontSize: 12,
+                          fontWeight: isFlagged
+                              ? FontWeight.bold
+                              : FontWeight.normal,
+                        ),
+                      ),
+                    ),
+                    DataCell(
+                      IconButton(
+                        icon: Icon(
+                          Icons.visibility_outlined,
+                          size: 20,
+                          color: hasSubmitted
+                              ? const Color(0xFF6C5CE7)
+                              : Colors.grey,
+                        ),
+                        onPressed: hasSubmitted
+                            ? () => _showStudentAnswersDialog(
+                                context,
+                                name,
+                                answers,
+                              )
+                            : null,
+                      ),
+                    ),
+                  ],
+                );
+              }).toList(),
+            ),
+          ),
+        ),
+        actions: [
+          ElevatedButton.icon(
+            onPressed: () async {
+              try {
+                var excel = ex.Excel.createExcel();
+                ex.Sheet sheet = excel['Sheet1'];
+                sheet.appendRow([
+                  ex.TextCellValue('Student Name'),
+                  ex.TextCellValue('Enrollment No'),
+                  ex.TextCellValue('Status'),
+                  ex.TextCellValue('Answered'),
+                  ex.TextCellValue('Skipped'),
+                  ex.TextCellValue('Score'),
+                  ex.TextCellValue('Flagged'),
+                ]);
+
+                for (var student in allStudents) {
+                  String name = student['name'] ?? 'Unknown';
+                  String? eNo = student['enrollno']?.toString();
+                  String? eNoAlt = student['Enrollment No']?.toString();
+                  String stdId = (eNo != null && eNo.isNotEmpty)
+                      ? eNo
+                      : (eNoAlt ?? '');
+                  final status = statuses[stdId];
+                  bool hasSubmitted = status?['is_done'] ?? false;
+                  int? score = status?['mcq_score'];
+                  bool isFlagged = status?['is_flagged'] ?? false;
+                  final Map<dynamic, dynamic>? answers = status?['answers'];
+                  int answeredCount = answers?.length ?? 0;
+                  int totalQuestions = originalMcqData.length;
+                  int skippedCount = hasSubmitted
+                      ? (totalQuestions - answeredCount)
+                      : 0;
+
+                  sheet.appendRow([
+                    ex.TextCellValue(name),
+                    ex.TextCellValue(stdId),
+                    ex.TextCellValue(hasSubmitted ? "Submitted" : "Pending"),
+                    ex.IntCellValue(answeredCount),
+                    ex.IntCellValue(skippedCount),
+                    ex.IntCellValue(score ?? 0),
+                    ex.TextCellValue(isFlagged ? "YES" : "NO"),
+                  ]);
+                }
+
+                var fileBytes = excel.save();
+                if (fileBytes != null) {
+                  String? outputFile = await FilePicker.platform.saveFile(
+                    dialogTitle: 'Select Save Location',
+                    fileName: 'MCQ_Results_${widget.assignment['title']}.xlsx',
+                    type: FileType.custom,
+                    allowedExtensions: ['xlsx'],
+                    bytes: Uint8List.fromList(fileBytes),
+                  );
+                  if (outputFile != null) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text('Report saved to $outputFile'),
+                        backgroundColor: Colors.green,
+                      ),
+                    );
+                  }
+                }
+              } catch (e) {
+                debugPrint('Excel Save Error: $e');
+              }
+            },
+            icon: const Icon(Icons.table_chart_outlined),
+            label: const Text('Download Excel Report'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF6C5CE7),
+              foregroundColor: Colors.white,
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
     );
   }
 }
