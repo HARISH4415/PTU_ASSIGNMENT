@@ -37,10 +37,8 @@ class _LoginScreenState extends State<LoginScreen> {
 
     if (success) {
       if (!mounted) return;
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const MainLayoutScreen()),
-      );
+      // The PTU_PORTALApp in main.dart handles the routing automatically via AnimatedBuilder
+      // We don't need to push manually here.
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Invalid credentials or user not found')),
@@ -671,6 +669,8 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
 
   String? _selectedDepartment;
   String? _selectedDesignation;
+  String? _selectedYear;
+  String? _selectedSemester;
 
   final List<String> _departments = [
     'Computer Science & Engineering',
@@ -691,6 +691,9 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
     'Lab Assistant',
   ];
 
+  final List<String> _years = ['1st Year', '2nd Year', '3rd Year', '4th Year'];
+  final List<String> _semesters = ['1', '2', '3', '4', '5', '6', '7', '8'];
+
   Future<void> _handleRegister() async {
     if (_formKey.currentState!.validate()) {
       setState(() => _isLoading = true);
@@ -701,6 +704,8 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
         email: _emailController.text.trim(),
         department: _selectedDepartment ?? '',
         designation: _selectedDesignation ?? '',
+        year: _selectedYear ?? '',
+        semester: _selectedSemester ?? '',
         password: _passController.text.trim(),
       );
       setState(() => _isLoading = false);
@@ -813,6 +818,73 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
                         .toList(),
                     onChanged: (v) => setState(() => _selectedDesignation = v),
                     validator: (v) => v == null ? 'Required' : null,
+                  ),
+                  const SizedBox(height: 16),
+
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _buildRegLabel('Academic Year'),
+                            DropdownButtonFormField<String>(
+                              value: _selectedYear,
+                              decoration: _inputDecoIcon(Icons.calendar_month),
+                              items: _years
+                                  .map((y) => DropdownMenuItem(
+                                      value: y, child: Text(y)))
+                                  .toList(),
+                              onChanged: (v) {
+                                setState(() {
+                                  _selectedYear = v;
+                                  // Reset semester if it's not valid for the new year
+                                  final semsMap = {
+                                    '1st Year': ['1', '2'],
+                                    '2nd Year': ['3', '4'],
+                                    '3rd Year': ['5', '6'],
+                                    '4th Year': ['7', '8']
+                                  };
+                                  final validSems = semsMap[v] ?? _semesters;
+                                  if (!validSems.contains(_selectedSemester)) {
+                                    _selectedSemester = validSems.first;
+                                  }
+                                });
+                              },
+                              validator: (v) => v == null ? 'Required' : null,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _buildRegLabel('Semester'),
+                            DropdownButtonFormField<String>(
+                              value: _selectedSemester,
+                              decoration: _inputDecoIcon(Icons.book),
+                              items: (() {
+                                final semsMap = {
+                                  '1st Year': ['1', '2'],
+                                  '2nd Year': ['3', '4'],
+                                  '3rd Year': ['5', '6'],
+                                  '4th Year': ['7', '8']
+                                };
+                                return (semsMap[_selectedYear] ?? _semesters)
+                                    .map((s) => DropdownMenuItem(
+                                        value: s, child: Text('Sem $s')))
+                                    .toList();
+                              })(),
+                              onChanged: (v) =>
+                                  setState(() => _selectedSemester = v),
+                              validator: (v) => v == null ? 'Required' : null,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 16),
 

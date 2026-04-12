@@ -130,6 +130,7 @@ class AppData extends ChangeNotifier {
   String? loggedSection;
   bool isRegistrationPending = false;
   List<Map<String, dynamic>> registeredStudents = [];
+  List<String> activeDepartments = [];
   Map<String, Map<String, dynamic>> currentAssignmentStatuses =
       {}; // student_id -> status_row
 
@@ -139,33 +140,74 @@ class AppData extends ChangeNotifier {
   List<Map<String, dynamic>> get filteredClasses {
     if (!isLoggedIn) return [];
 
-    // Use the logged-in user's department to show their specific course
-    String? dept = loggedDepartment;
-    if (dept == null || dept.isEmpty) return [];
+    if (currentUserRole == UserRole.teacher) {
+      String? dept = loggedDepartment;
+      if (dept == null || dept.isEmpty) return [];
+      return [_buildClassNode(dept)];
+    } else {
+      // Students see all active departments
+      if (activeDepartments.isEmpty) {
+        // Fallback to their own department if no others found yet
+        if (loggedDepartment != null && loggedDepartment!.isNotEmpty) {
+          return [_buildClassNode(loggedDepartment!)];
+        }
+        return [];
+      }
+      return activeDepartments.map((d) => _buildClassNode(d)).toList();
+    }
+  }
 
+  Map<String, dynamic> _buildClassNode(String dept) {
     // Map departments to their brand colors for a premium look
     Color courseColor = const Color(0xFF6C5CE7); // Default brand color
     if (dept.toLowerCase().contains('computer') ||
-        dept.toLowerCase().contains('it'))
+        dept.toLowerCase().contains('it')) {
       courseColor = Colors.deepOrange.shade400;
-    if (dept.toLowerCase().contains('bank') ||
-        dept.toLowerCase().contains('finance'))
+    } else if (dept.toLowerCase().contains('bank') ||
+        dept.toLowerCase().contains('finance')) {
       courseColor = Colors.teal.shade500;
-    if (dept.toLowerCase().contains('literature'))
+    } else if (dept.toLowerCase().contains('literature')) {
       courseColor = Colors.indigo.shade400;
+    } else if (dept.toLowerCase().contains('electronic')) {
+      courseColor = Colors.blue.shade600;
+    } else if (dept.toLowerCase().contains('mechanical')) {
+      courseColor = Colors.red.shade600;
+    } else if (dept.toLowerCase().contains('civil')) {
+      courseColor = Colors.brown.shade500;
+    }
 
-    return [
-      {
-        'id': 'dept_${dept.replaceAll(' ', '_').toLowerCase()}',
-        'title': dept,
-        'subtitle': currentUserRole == UserRole.teacher
-            ? 'Prof. $loggedName'
-            : 'Subject Specialization',
-        'color': courseColor,
-        'progress': 0.50, // Default progress for visual effect
-        'time': '00:00:00',
-      },
-    ];
+    return {
+      'id': 'dept_${dept.replaceAll(' ', '_').toLowerCase()}',
+      'title': dept,
+      'subtitle': currentUserRole == UserRole.teacher
+          ? 'Prof. $loggedName'
+          : 'Faculty Course',
+      'color': courseColor,
+      'progress': 0.50,
+      'time': '00:00:00',
+    };
+  }
+
+  List<Map<String, dynamic>> filteredAssignments(String classId) {
+    final list = classAssignments[classId];
+    if (list == null) return [];
+
+    // Filter by Year/Sem for BOTH students and teachers
+    return list.where((a) {
+      final targetYear = a['year']?.toString().trim() ?? 'All';
+      final targetSem = a['semester']?.toString().trim() ?? 'All';
+
+      // "All" is a wildcard that matches everyone
+      bool yearMatch =
+          targetYear == 'All' ||
+          targetYear.toLowerCase() == (loggedYear?.toLowerCase().trim() ?? '');
+      bool semMatch =
+          targetSem == 'All' ||
+          targetSem.toLowerCase() ==
+              (loggedSemester?.toLowerCase().trim() ?? '');
+
+      return yearMatch && semMatch;
+    }).toList();
   }
 
   Map<String, List<Map<String, dynamic>>> classAssignments = {};
@@ -280,6 +322,23 @@ class AppData extends ChangeNotifier {
     }
   }
 
+  Future<void> fetchActiveDepartments() async {
+    try {
+      final data = await supabase
+          .from('teacher_register_details')
+          .select('department');
+      final List<String> depts = (data as List)
+          .map((e) => e['department']?.toString() ?? '')
+          .where((d) => d.isNotEmpty)
+          .toSet()
+          .toList();
+      activeDepartments = depts;
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Error fetching active departments: $e');
+    }
+  }
+
   Future<void> fetchAssignmentStatusesForTeacher(
     String assignmentId, {
     bool isMcq = false,
@@ -343,8 +402,8 @@ class AppData extends ChangeNotifier {
   }
 
   Future<bool> loginTeacher(String teacherId, String passwordInput) async {
+    // Step 1: Check if registered in teacher_register_details
     try {
-      // Step 1: Check if registered in teacher_register_details
       var registeredCheck;
       try {
         registeredCheck = await supabase
@@ -352,21 +411,17 @@ class AppData extends ChangeNotifier {
             .select()
             .eq('teacher_id', teacherId)
             .maybeSingle();
-
-        if (registeredCheck == null) {
+      } catch (e) {
+        debugPrint('Step 1 loginTeacher details check failed: $e');
+        // If teacher_id column is missing, maybe it's Teacher ID?
+        // But since the user is getting errors for 'Teacher ID', we should stick to teacher_id or other common variants
+        try {
           registeredCheck = await supabase
               .from('teacher_register_details')
               .select()
-              .eq('Teacher ID', int.tryParse(teacherId) ?? -1)
+              .eq('teacherid', teacherId)
               .maybeSingle();
-        }
-      } catch (e) {
-        debugPrint('Step 1 loginTeacher fallback: $e');
-        registeredCheck = await supabase
-            .from('teacher_register_details')
-            .select()
-            .eq('Teacher ID', int.tryParse(teacherId) ?? -1)
-            .maybeSingle();
+        } catch (_) {}
       }
 
       if (registeredCheck != null) {
@@ -377,10 +432,11 @@ class AppData extends ChangeNotifier {
           loggedTeacherId = teacherId;
           loggedName = registeredCheck['name']?.toString();
           loggedEmail = registeredCheck['email']?.toString();
-          // Convert numeric phone to string
           loggedPhone = registeredCheck['phone']?.toString();
           loggedDepartment = registeredCheck['department']?.toString();
           loggedDesignation = registeredCheck['designation']?.toString();
+          loggedYear = registeredCheck['year']?.toString();
+          loggedSemester = registeredCheck['semester']?.toString();
           saveSession();
           notifyListeners();
           loadAssignmentsFromSupabase();
@@ -391,23 +447,47 @@ class AppData extends ChangeNotifier {
           return false;
         }
       }
+    } catch (e) {
+      debugPrint('Step 1 loginTeacher outer error: $e');
+    }
 
-      // Step 2: Check if existing in teacher_int (initial registration)
+    // Step 2: Check if existing in teacher_enrollments (initial registration)
+    try {
+      var preCheck = await supabase
+          .from('teacher_enrollments')
+          .select()
+          .eq('teacher_id', teacherId)
+          .maybeSingle();
+
+      if (preCheck == null) {
+        preCheck = await supabase
+            .from('teacher_enrollments')
+            .select()
+            .eq('Teacher ID', int.tryParse(teacherId) ?? -1)
+            .maybeSingle();
+      }
+
+      if (preCheck != null && passwordInput == 'ptu@123') {
+        isRegistrationPending = true;
+        currentUserRole = UserRole.teacher;
+        loggedTeacherId = teacherId;
+        loggedName = (preCheck['teacher_name'] ?? preCheck['name'])?.toString();
+        saveSession();
+        notifyListeners();
+        debugPrint(
+          'Teacher Initial Login Success (teacher_enrollments): $teacherId',
+        );
+        return true;
+      }
+    } catch (e) {
+      debugPrint('Step 2 loginTeacher (teacher_enrollments) failed: $e');
+      // Fallback to legacy teacher_int
       try {
-        var preCheck = await supabase
+        final preCheck = await supabase
             .from('teacher_int')
             .select()
             .eq('teacher_id', teacherId)
             .maybeSingle();
-
-        if (preCheck == null) {
-          preCheck = await supabase
-              .from('teacher_int')
-              .select()
-              .eq('Teacher ID', int.tryParse(teacherId) ?? -1)
-              .maybeSingle();
-        }
-
         if (preCheck != null && passwordInput == 'ptu@123') {
           isRegistrationPending = true;
           currentUserRole = UserRole.teacher;
@@ -415,57 +495,49 @@ class AppData extends ChangeNotifier {
           loggedName = preCheck['name']?.toString();
           saveSession();
           notifyListeners();
-          debugPrint('Teacher Initial Login Success: $teacherId');
+          debugPrint(
+            'Teacher Initial Login Success (teacher_int fallback): $teacherId',
+          );
           return true;
         }
-      } catch (e) {
-        debugPrint(
-          'Step 2 loginTeacher skipped or failed (checking fallback): $e',
-        );
-        final preCheck = await supabase
-            .from('teacher_int')
-            .select()
-            .eq('Teacher ID', int.tryParse(teacherId) ?? -1)
-            .maybeSingle();
-        if (preCheck != null && passwordInput == 'ptu@123') {
-          isRegistrationPending = true;
-          currentUserRole = UserRole.teacher;
-          loggedTeacherId = teacherId;
-          loggedName = preCheck['name']?.toString();
-          saveSession();
-          notifyListeners();
-          debugPrint('Teacher Initial Login Success (fallback): $teacherId');
-          return true;
-        }
+      } catch (err) {
+        debugPrint('Step 2 loginTeacher (teacher_int) failed: $err');
       }
-
-      return false;
-    } catch (e) {
-      debugPrint('Teacher login error: $e');
-      return false;
     }
+
+    return false;
   }
 
   Future<bool> loginStudent(String enrollNo, String passwordInput) async {
+    // Step 1: Check registered status
     try {
-      // Step 1: Check if this user is already registered in student_registered_details
-      var registeredCheck = await supabase
-          .from('student_registered_details')
-          .select()
-          .eq('enrollno', enrollNo)
-          .maybeSingle();
-
-      // Fallback: Check 'Enrollment No' column if 'enrollno' comes back empty
-      if (registeredCheck == null) {
+      var registeredCheck;
+      try {
         registeredCheck = await supabase
             .from('student_registered_details')
             .select()
-            .eq('Enrollment No', int.tryParse(enrollNo) ?? -1)
+            .eq('enrollno', enrollNo)
             .maybeSingle();
+
+        if (registeredCheck == null) {
+          registeredCheck = await supabase
+              .from('student_registered_details')
+              .select()
+              .eq('Enrollment No', int.tryParse(enrollNo) ?? -1)
+              .maybeSingle();
+        }
+      } catch (e) {
+        debugPrint('Step 1 student registered check failed: $e');
+        try {
+          registeredCheck = await supabase
+              .from('student_registered_details')
+              .select()
+              .eq('Enrollment No', int.tryParse(enrollNo) ?? -1)
+              .maybeSingle();
+        } catch (_) {}
       }
 
       if (registeredCheck != null) {
-        // Already registered: Check if the password they typed matches their saved password
         if (registeredCheck['password'] == passwordInput) {
           isLoggedIn = true;
           isRegistrationPending = false;
@@ -487,43 +559,56 @@ class AppData extends ChangeNotifier {
           return false;
         }
       }
+    } catch (e) {
+      debugPrint('Step 1 student outer error: $e');
+    }
 
-      // Step 2: If not registered, it's their FIRST TIME. Check student_int.
+    // Step 2: If not registered, it's their FIRST TIME. Check student_int.
+    try {
       var preCheck = await supabase
           .from('student_int')
           .select()
-          .eq('enrollno', enrollNo)
+          .eq('Enrollment No', int.tryParse(enrollNo) ?? -1)
           .maybeSingle();
 
-      // Fallback: Check 'Enrollment No' column if 'enrollno' comes back empty
       if (preCheck == null) {
         preCheck = await supabase
             .from('student_int')
             .select()
-            .eq('Enrollment No', int.tryParse(enrollNo) ?? -1)
+            .eq('enrollno', enrollNo)
             .maybeSingle();
       }
 
-      if (preCheck != null) {
-        // Initial password for all new students is 'ptu@123'
-        if (passwordInput == 'ptu@123') {
+      if (preCheck != null && passwordInput == 'ptu@123') {
+        isRegistrationPending = true;
+        currentUserRole = UserRole.student;
+        loggedEnrollNo = enrollNo;
+        loggedName = preCheck['name']?.toString();
+        saveSession();
+        notifyListeners();
+        return true;
+      }
+    } catch (e) {
+      debugPrint('Step 2 student check failed: $e');
+      try {
+        final preCheck = await supabase
+            .from('student_int')
+            .select()
+            .eq('enrollno', enrollNo)
+            .maybeSingle();
+        if (preCheck != null && passwordInput == 'ptu@123') {
           isRegistrationPending = true;
+          currentUserRole = UserRole.student;
           loggedEnrollNo = enrollNo;
           loggedName = preCheck['name']?.toString();
           saveSession();
           notifyListeners();
           return true;
-        } else {
-          debugPrint('Initial password must be ptu@123');
-          return false;
         }
-      }
-
-      return false; // Not registered, not in initial list either
-    } catch (e) {
-      debugPrint('Student login error: $e');
-      return false;
+      } catch (_) {}
     }
+
+    return false;
   }
 
   Future<String?> registerTeacherDetails({
@@ -533,17 +618,20 @@ class AppData extends ChangeNotifier {
     required String email,
     required String department,
     required String designation,
+    required String year,
+    required String semester,
     required String password,
   }) async {
     try {
       await supabase.from('teacher_register_details').insert({
         'teacher_id': teacherId,
-        'Teacher ID': int.tryParse(teacherId) ?? -1,
         'name': name,
         'phone': phone,
         'email': email,
         'department': department,
         'designation': designation,
+        'year': year,
+        'semester': semester,
         'password': password,
         'is_registered': true,
       });
@@ -555,11 +643,99 @@ class AppData extends ChangeNotifier {
       loggedEmail = email;
       loggedDepartment = department;
       loggedDesignation = designation;
+      loggedYear = year;
+      loggedSemester = semester;
       saveSession();
       notifyListeners();
       return null;
+    } on PostgrestException catch (e) {
+      debugPrint('Teacher registration error (Supabase): ${e.message}');
+      return 'Database error: ${e.message}';
     } catch (e) {
-      return e.toString();
+      debugPrint('Teacher registration error: $e');
+      return 'Unexpected error: ${e.toString()}';
+    }
+  }
+
+  Future<String?> updateProfile({
+    String? name,
+    String? phone,
+    String? email,
+    String? year,
+    String? semester,
+    String? section,
+    String? designation,
+  }) async {
+    try {
+      final role = currentUserRole;
+      final table = role == UserRole.teacher
+          ? 'teacher_register_details'
+          : 'student_registered_details';
+
+      String idField;
+      dynamic idValue;
+
+      if (role == UserRole.teacher) {
+        idField = 'teacher_id';
+        idValue = loggedTeacherId;
+      } else {
+        idField = 'Enrollment No';
+        idValue = int.tryParse(loggedEnrollNo ?? '') ?? -1;
+      }
+
+      if (idField == 'Enrollment No' && idValue == -1) {
+        idField = 'enrollno';
+        idValue = loggedEnrollNo;
+      }
+
+      if (idValue == null) return 'Not logged in';
+
+      Map<String, dynamic> updates = {};
+      if (name != null) updates['name'] = name;
+      if (email != null) updates['email'] = email;
+      if (year != null) updates['year'] = year;
+      if (semester != null) updates['semester'] = semester;
+      if (section != null) updates['section'] = section;
+      if (designation != null) updates['designation'] = designation;
+
+      if (phone != null) {
+        if (role == UserRole.teacher) {
+          updates['phone'] = num.tryParse(phone) ?? 0;
+        } else {
+          updates['phone'] = phone;
+        }
+      }
+
+      if (updates.isEmpty) return null;
+
+      final response = await supabase
+          .from(table)
+          .update(updates)
+          .eq(idField, idValue)
+          .select();
+
+      if ((response as List).isEmpty) {
+        return 'No record found matching $idField=$idValue. Update failed.';
+      }
+
+      // Update local state
+      if (name != null) loggedName = name;
+      if (phone != null) loggedPhone = phone;
+      if (email != null) loggedEmail = email;
+      if (year != null) loggedYear = year;
+      if (semester != null) loggedSemester = semester;
+      if (section != null) loggedSection = section;
+      if (designation != null) loggedDesignation = designation;
+
+      saveSession();
+      notifyListeners();
+      return null;
+    } on PostgrestException catch (e) {
+      debugPrint('Update profile DB error: ${e.message}');
+      return 'Database error: ${e.message}';
+    } catch (e) {
+      debugPrint('Update profile error: $e');
+      return 'Unexpected error: ${e.toString()}';
     }
   }
 
@@ -740,6 +916,7 @@ class AppData extends ChangeNotifier {
   Future<void> loadAssignmentsFromSupabase() async {
     try {
       fetchRegisteredStudents(); // Load students
+      fetchActiveDepartments(); // Load active departments (courses)
 
       // 1. Fetch MCQs
       final mcqRows = await supabase.from('teacher_mcq_content').select();
@@ -1069,10 +1246,6 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
                   child: OutlinedButton.icon(
                     onPressed: () {
                       AppData().logout();
-                      Navigator.pushReplacement(
-                        context,
-                        MaterialPageRoute(builder: (_) => const LoginScreen()),
-                      );
                     },
                     icon: const Icon(
                       Icons.logout,
@@ -1270,7 +1443,7 @@ class _McqCentralViewState extends State<McqCentralView> {
     // Flatten assignments that have mcqData
     List<Map<String, dynamic>> allMcqTests = [];
     for (var cls in AppData().filteredClasses) {
-      var assigns = AppData().classAssignments[cls['id']] ?? [];
+      var assigns = AppData().filteredAssignments(cls['id'] ?? '');
       for (var a in assigns) {
         if (a['mcqData'] != null) {
           allMcqTests.add({'classData': cls, 'assignment': a});
@@ -1471,6 +1644,8 @@ class _McqCentralViewState extends State<McqCentralView> {
     TextEditingController randomCountCtrl = TextEditingController();
     DateTime startDateTime = DateTime.now();
     DateTime endDateTime = DateTime.now().add(const Duration(minutes: 30));
+    String selectedYear = AppData().loggedYear ?? 'All';
+    String selectedSem = AppData().loggedSemester ?? 'All';
     String? selectedClassId = AppData().filteredClasses.isNotEmpty
         ? AppData().filteredClasses.first['id']
         : null;
@@ -1689,6 +1864,8 @@ class _McqCentralViewState extends State<McqCentralView> {
                         selectedClassId!,
                         titleCtrl.text,
                         endDateTime.toString().substring(0, 16),
+                        year: selectedYear,
+                        semester: selectedSem,
                         mcqData: mcqData,
                         timePerQuestion: timePerQ,
                         questionsToShow: questionsToShow,
@@ -1780,6 +1957,14 @@ class ProfileView extends StatelessWidget {
                               _buildInfoRow(
                                 'Designation',
                                 AppData().loggedDesignation ?? 'N/A',
+                              ),
+                              _buildInfoRow(
+                                'Academic Year',
+                                AppData().loggedYear ?? 'N/A',
+                              ),
+                              _buildInfoRow(
+                                'Current Semester',
+                                AppData().loggedSemester ?? 'N/A',
                               ),
                               _buildInfoRow(
                                 'Specialization',
@@ -1929,7 +2114,7 @@ class ProfileView extends StatelessWidget {
             ),
           ),
           ElevatedButton.icon(
-            onPressed: () {},
+            onPressed: () => _showEditProfileDialog(context, isTeacher),
             icon: const Icon(Icons.edit_outlined, size: 18),
             label: const Text('Edit Profile'),
             style: ElevatedButton.styleFrom(
@@ -1942,6 +2127,248 @@ class ProfileView extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  void _showEditProfileDialog(BuildContext context, bool isTeacher) {
+    final nameCtrl = TextEditingController(text: AppData().loggedName);
+    final emailCtrl = TextEditingController(text: AppData().loggedEmail);
+    final phoneCtrl = TextEditingController(text: AppData().loggedPhone);
+    final sectionCtrl = TextEditingController(text: AppData().loggedSection);
+
+    String? selectedYear = AppData().loggedYear;
+    String? selectedSem = AppData().loggedSemester;
+    String? selectedDesignation = AppData().loggedDesignation;
+
+    final years = ['1st Year', '2nd Year', '3rd Year', '4th Year'];
+    final semsMap = {
+      '1st Year': ['1', '2'],
+      '2nd Year': ['3', '4'],
+      '3rd Year': ['5', '6'],
+      '4th Year': ['7', '8'],
+    };
+    final designations = [
+      'Assistant Professor',
+      'Associate Professor',
+      'Professor',
+      'Head of Department',
+      'Lab Assistant',
+    ];
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          final List<String> availableSems =
+              semsMap[selectedYear] ?? ['1', '2', '3', '4', '5', '6', '7', '8'];
+          if (!availableSems.contains(selectedSem)) {
+            selectedSem = availableSems.first;
+          }
+
+          return AlertDialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(24),
+            ),
+            title: Row(
+              children: [
+                Icon(Icons.edit_square, color: const Color(0xFF6C5CE7)),
+                const SizedBox(width: 8),
+                const Text('Edit Profile'),
+              ],
+            ),
+            content: SizedBox(
+              width: 400,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: nameCtrl,
+                      decoration: InputDecoration(
+                        labelText: 'Full Name',
+                        prefixIcon: const Icon(Icons.person_outline),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        filled: true,
+                        fillColor: Colors.grey.shade50,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: emailCtrl,
+                      decoration: InputDecoration(
+                        labelText: 'Email Address',
+                        prefixIcon: const Icon(Icons.email_outlined),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        filled: true,
+                        fillColor: Colors.grey.shade50,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: phoneCtrl,
+                      decoration: InputDecoration(
+                        labelText: 'Phone Number',
+                        prefixIcon: const Icon(Icons.phone_outlined),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        filled: true,
+                        fillColor: Colors.grey.shade50,
+                      ),
+                    ),
+                    if (!isTeacher) ...[
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: sectionCtrl,
+                        decoration: InputDecoration(
+                          labelText: 'Section',
+                          prefixIcon: const Icon(Icons.groups_outlined),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          filled: true,
+                          fillColor: Colors.grey.shade50,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            value: years.contains(selectedYear)
+                                ? selectedYear
+                                : null,
+                            decoration: InputDecoration(
+                              labelText: 'Academic Year',
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              filled: true,
+                              fillColor: Colors.grey.shade50,
+                            ),
+                            items: years
+                                .map(
+                                  (y) => DropdownMenuItem(
+                                    value: y,
+                                    child: Text(y),
+                                  ),
+                                )
+                                .toList(),
+                            onChanged: (v) =>
+                                setDialogState(() => selectedYear = v),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            value: availableSems.contains(selectedSem)
+                                ? selectedSem
+                                : null,
+                            decoration: InputDecoration(
+                              labelText: 'Semester',
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              filled: true,
+                              fillColor: Colors.grey.shade50,
+                            ),
+                            items: availableSems
+                                .map(
+                                  (s) => DropdownMenuItem(
+                                    value: s,
+                                    child: Text('Sem $s'),
+                                  ),
+                                )
+                                .toList(),
+                            onChanged: (v) =>
+                                setDialogState(() => selectedSem = v),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (isTeacher) ...[
+                      const SizedBox(height: 16),
+                      DropdownButtonFormField<String>(
+                        value: designations.contains(selectedDesignation)
+                            ? selectedDesignation
+                            : null,
+                        decoration: InputDecoration(
+                          labelText: 'Designation',
+                          prefixIcon: const Icon(Icons.work_outline),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          filled: true,
+                          fillColor: Colors.grey.shade50,
+                        ),
+                        items: designations
+                            .map(
+                              (d) => DropdownMenuItem(value: d, child: Text(d)),
+                            )
+                            .toList(),
+                        onChanged: (v) =>
+                            setDialogState(() => selectedDesignation = v),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: () async {
+                  String? error = await AppData().updateProfile(
+                    name: nameCtrl.text.trim(),
+                    email: emailCtrl.text.trim(),
+                    phone: phoneCtrl.text.trim(),
+                    year: selectedYear,
+                    semester: selectedSem,
+                    section: !isTeacher ? sectionCtrl.text.trim() : null,
+                    designation: isTeacher ? selectedDesignation : null,
+                  );
+                  if (error == null) {
+                    Navigator.pop(ctx);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Profile Updated Successfully!'),
+                      ),
+                    );
+                  } else {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(error),
+                        backgroundColor: Colors.redAccent,
+                      ),
+                    );
+                  }
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF6C5CE7),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 12,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                child: const Text('Save Changes'),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -2125,8 +2552,10 @@ class DashboardView extends StatelessWidget {
               const SizedBox(width: 24),
               _buildStatCard(
                 isTeacher ? 'Assignments Created' : 'Pending Assignments',
-                AppData().classAssignments.values
-                    .expand((e) => e)
+                AppData().filteredClasses
+                    .expand(
+                      (cls) => AppData().filteredAssignments(cls['id'] ?? ''),
+                    )
                     .where((a) => !a['isDone'])
                     .length
                     .toString(),
@@ -2136,8 +2565,10 @@ class DashboardView extends StatelessWidget {
               const SizedBox(width: 24),
               _buildStatCard(
                 isTeacher ? 'Submissions to Review' : 'Completed Work',
-                AppData().classAssignments.values
-                    .expand((e) => e)
+                AppData().filteredClasses
+                    .expand(
+                      (cls) => AppData().filteredAssignments(cls['id'] ?? ''),
+                    )
                     .where((a) => a['isDone'])
                     .length
                     .toString(),
@@ -3633,7 +4064,7 @@ class _AssignmentsViewState extends State<AssignmentsView> {
     // Flatten assignments
     List<Map<String, dynamic>> allAssignments = [];
     for (var cls in AppData().filteredClasses) {
-      var assigns = AppData().classAssignments[cls['id']] ?? [];
+      var assigns = AppData().filteredAssignments(cls['id'] ?? '');
       for (var a in assigns) {
         if (a['mcqData'] == null) {
           allAssignments.add({'classData': cls, 'assignment': a});
@@ -3851,8 +4282,8 @@ class _AssignmentsViewState extends State<AssignmentsView> {
     DateTime startDateTime = DateTime.now();
     DateTime endDateTime = DateTime.now().add(const Duration(days: 7));
     String? selectedClassId = AppData().filteredClasses.first['id'];
-    String selectedYear = '1st Year';
-    String selectedSem = 'Sem 1';
+    String selectedYear = AppData().loggedYear ?? 'All';
+    String selectedSem = AppData().loggedSemester ?? 'All';
     PlatformFile? pickedFile;
     List<dynamic>? mcqData;
 
@@ -3870,65 +4301,6 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: DropdownButtonFormField<String>(
-                              value: selectedYear,
-                              items:
-                                  [
-                                        '1st Year',
-                                        '2nd Year',
-                                        '3rd Year',
-                                        '4th Year',
-                                      ]
-                                      .map(
-                                        (y) => DropdownMenuItem(
-                                          value: y,
-                                          child: Text(y),
-                                        ),
-                                      )
-                                      .toList(),
-                              onChanged: (val) =>
-                                  setDialogState(() => selectedYear = val!),
-                              decoration: const InputDecoration(
-                                labelText: 'Year',
-                                border: OutlineInputBorder(),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 16),
-                          Expanded(
-                            child: DropdownButtonFormField<String>(
-                              value: selectedSem,
-                              items:
-                                  [
-                                        'Sem 1',
-                                        'Sem 2',
-                                        'Sem 3',
-                                        'Sem 4',
-                                        'Sem 5',
-                                        'Sem 6',
-                                        'Sem 7',
-                                        'Sem 8',
-                                      ]
-                                      .map(
-                                        (s) => DropdownMenuItem(
-                                          value: s,
-                                          child: Text(s),
-                                        ),
-                                      )
-                                      .toList(),
-                              onChanged: (val) =>
-                                  setDialogState(() => selectedSem = val!),
-                              decoration: const InputDecoration(
-                                labelText: 'Semester',
-                                border: OutlineInputBorder(),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
                       const SizedBox(height: 16),
                       TextField(
                         controller: titleCtrl,
@@ -4173,10 +4545,10 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                       AnimatedBuilder(
                         animation: AppData(),
                         builder: (ctx, _) {
-                          List assigns =
-                              (AppData().classAssignments[classId] ?? [])
-                                  .where((a) => a['mcqData'] == null)
-                                  .toList();
+                          List assigns = AppData()
+                              .filteredAssignments(classId)
+                              .where((a) => a['mcqData'] == null)
+                              .toList();
                           if (assigns.isEmpty)
                             return const Text('No assignments yet.');
 
@@ -4426,8 +4798,8 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
     TextEditingController titleCtrl = TextEditingController();
     DateTime startDateTime = DateTime.now();
     DateTime endDateTime = DateTime.now().add(const Duration(days: 7));
-    String selectedYear = '1st Year';
-    String selectedSem = 'Sem 1';
+    String selectedYear = AppData().loggedYear ?? 'All';
+    String selectedSem = AppData().loggedSemester ?? 'All';
     PlatformFile? pickedFile;
     List<dynamic>? mcqData;
 
@@ -4443,60 +4815,6 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: DropdownButtonFormField<String>(
-                            value: selectedYear,
-                            items:
-                                ['1st Year', '2nd Year', '3rd Year', '4th Year']
-                                    .map(
-                                      (y) => DropdownMenuItem(
-                                        value: y,
-                                        child: Text(y),
-                                      ),
-                                    )
-                                    .toList(),
-                            onChanged: (val) =>
-                                setDialogState(() => selectedYear = val!),
-                            decoration: const InputDecoration(
-                              labelText: 'Year',
-                              border: OutlineInputBorder(),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: DropdownButtonFormField<String>(
-                            value: selectedSem,
-                            items:
-                                [
-                                      'Sem 1',
-                                      'Sem 2',
-                                      'Sem 3',
-                                      'Sem 4',
-                                      'Sem 5',
-                                      'Sem 6',
-                                      'Sem 7',
-                                      'Sem 8',
-                                    ]
-                                    .map(
-                                      (s) => DropdownMenuItem(
-                                        value: s,
-                                        child: Text(s),
-                                      ),
-                                    )
-                                    .toList(),
-                            onChanged: (val) =>
-                                setDialogState(() => selectedSem = val!),
-                            decoration: const InputDecoration(
-                              labelText: 'Semester',
-                              border: OutlineInputBorder(),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
                     const SizedBox(height: 16),
                     TextField(
                       controller: titleCtrl,
