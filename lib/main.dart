@@ -345,11 +345,29 @@ class AppData extends ChangeNotifier {
   Future<bool> loginTeacher(String teacherId, String passwordInput) async {
     try {
       // Step 1: Check if registered in teacher_register_details
-      final registeredCheck = await supabase
-          .from('teacher_register_details')
-          .select()
-          .eq('teacher_id', teacherId)
-          .maybeSingle();
+      var registeredCheck;
+      try {
+        registeredCheck = await supabase
+            .from('teacher_register_details')
+            .select()
+            .eq('teacher_id', teacherId)
+            .maybeSingle();
+
+        if (registeredCheck == null) {
+          registeredCheck = await supabase
+              .from('teacher_register_details')
+              .select()
+              .eq('Teacher ID', int.tryParse(teacherId) ?? -1)
+              .maybeSingle();
+        }
+      } catch (e) {
+        debugPrint('Step 1 loginTeacher fallback: $e');
+        registeredCheck = await supabase
+            .from('teacher_register_details')
+            .select()
+            .eq('Teacher ID', int.tryParse(teacherId) ?? -1)
+            .maybeSingle();
+      }
 
       if (registeredCheck != null) {
         if (registeredCheck['password'] == passwordInput) {
@@ -357,12 +375,12 @@ class AppData extends ChangeNotifier {
           isRegistrationPending = false;
           currentUserRole = UserRole.teacher;
           loggedTeacherId = teacherId;
-          loggedName = registeredCheck['name'];
-          loggedEmail = registeredCheck['email'];
+          loggedName = registeredCheck['name']?.toString();
+          loggedEmail = registeredCheck['email']?.toString();
           // Convert numeric phone to string
           loggedPhone = registeredCheck['phone']?.toString();
-          loggedDepartment = registeredCheck['department'];
-          loggedDesignation = registeredCheck['designation'];
+          loggedDepartment = registeredCheck['department']?.toString();
+          loggedDesignation = registeredCheck['designation']?.toString();
           saveSession();
           notifyListeners();
           loadAssignmentsFromSupabase();
@@ -374,18 +392,27 @@ class AppData extends ChangeNotifier {
         }
       }
 
+      // Step 2: Check if existing in teacher_int (initial registration)
       try {
-        final preCheck = await supabase
+        var preCheck = await supabase
             .from('teacher_int')
             .select()
             .eq('teacher_id', teacherId)
             .maybeSingle();
 
+        if (preCheck == null) {
+          preCheck = await supabase
+              .from('teacher_int')
+              .select()
+              .eq('Teacher ID', int.tryParse(teacherId) ?? -1)
+              .maybeSingle();
+        }
+
         if (preCheck != null && passwordInput == 'ptu@123') {
           isRegistrationPending = true;
           currentUserRole = UserRole.teacher;
           loggedTeacherId = teacherId;
-          loggedName = preCheck['name'];
+          loggedName = preCheck['name']?.toString();
           saveSession();
           notifyListeners();
           debugPrint('Teacher Initial Login Success: $teacherId');
@@ -393,9 +420,23 @@ class AppData extends ChangeNotifier {
         }
       } catch (e) {
         debugPrint(
-          'Step 2 loginTeacher skipped (likely teacher_int missing or error): $e',
+          'Step 2 loginTeacher skipped or failed (checking fallback): $e',
         );
-        // Continue to return false if both steps fail
+        final preCheck = await supabase
+            .from('teacher_int')
+            .select()
+            .eq('Teacher ID', int.tryParse(teacherId) ?? -1)
+            .maybeSingle();
+        if (preCheck != null && passwordInput == 'ptu@123') {
+          isRegistrationPending = true;
+          currentUserRole = UserRole.teacher;
+          loggedTeacherId = teacherId;
+          loggedName = preCheck['name']?.toString();
+          saveSession();
+          notifyListeners();
+          debugPrint('Teacher Initial Login Success (fallback): $teacherId');
+          return true;
+        }
       }
 
       return false;
@@ -497,6 +538,7 @@ class AppData extends ChangeNotifier {
     try {
       await supabase.from('teacher_register_details').insert({
         'teacher_id': teacherId,
+        'Teacher ID': int.tryParse(teacherId) ?? -1,
         'name': name,
         'phone': phone,
         'email': email,
