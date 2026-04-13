@@ -1177,120 +1177,32 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
 
   @override
   Widget build(BuildContext context) {
+    double width = MediaQuery.of(context).size.width;
+    bool isMobile = width < 1000;
+
     return ListenableBuilder(
       listenable: AppData(),
       builder: (context, _) => Scaffold(
+        drawer: isMobile
+            ? Drawer(
+                width: 280,
+                backgroundColor: Colors.white,
+                child: SafeArea(child: _buildSidebarContent()),
+              )
+            : null,
         body: Row(
           children: [
-            // Persistent Sidebar
-            Container(
-              width: 260,
-              color: Colors.white,
-              child: Column(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.all(24.0),
-                    child: Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF6C5CE7),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: const Icon(
-                            Icons.menu_book,
-                            color: Colors.white,
-                            size: 24,
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        const Text(
-                          'PTU_PORTAL',
-                          style: TextStyle(
-                            fontSize: 22,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: -0.5,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  _buildUserInfo(),
-                  const SizedBox(height: 32),
-                  Expanded(
-                    child: ListView(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      children: [
-                        const Text(
-                          'MENU',
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.grey,
-                            letterSpacing: 1.2,
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        _buildNavItem(
-                          Icons.grid_view_rounded,
-                          'Dashboard',
-                          NavPage.dashboard,
-                        ),
-                        _buildNavItem(
-                          Icons.library_books_rounded,
-                          'Courses',
-                          NavPage.courses,
-                        ),
-                        _buildNavItem(
-                          Icons.video_camera_front_rounded,
-                          'Live Class WebRTC',
-                          NavPage.liveClass,
-                        ),
-                        _buildNavItem(
-                          Icons.assignment_rounded,
-                          'Assignments',
-                          NavPage.assignments,
-                        ),
-                        _buildNavItem(Icons.quiz_rounded, 'MCQs', NavPage.mcq),
-                        _buildNavItem(
-                          Icons.person_rounded,
-                          'Profile',
-                          NavPage.profile,
-                        ),
-                      ],
-                    ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.all(24.0),
-                    child: OutlinedButton.icon(
-                      onPressed: () {
-                        AppData().logout();
-                      },
-                      icon: const Icon(
-                        Icons.logout,
-                        size: 18,
-                        color: Colors.redAccent,
-                      ),
-                      label: const Text(
-                        'Log Out',
-                        style: TextStyle(color: Colors.redAccent),
-                      ),
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        side: BorderSide(color: Colors.redAccent.withAlpha(50)),
-                        minimumSize: const Size.fromHeight(50),
-                      ),
-                    ),
-                  ),
-                ],
+            // Persistent Sidebar (Desktop Only)
+            if (!isMobile)
+              Container(
+                width: 260,
+                color: Colors.white,
+                child: _buildSidebarContent(),
               ),
-            ),
-  
-            // Vertical Divider
-            Container(width: 1, color: Colors.grey.shade200),
-  
+
+            // Vertical Divider (Desktop Only)
+            if (!isMobile) Container(width: 1, color: Colors.grey.shade200),
+
             // Main Content Area
             Expanded(
               child: Column(
@@ -1298,7 +1210,9 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
                   // Top Header
                   Container(
                     height: 80,
-                    padding: const EdgeInsets.symmetric(horizontal: 40),
+                    padding: EdgeInsets.symmetric(
+                      horizontal: isMobile ? 16 : 40,
+                    ),
                     decoration: BoxDecoration(
                       color: Colors.white,
                       border: Border(
@@ -1307,44 +1221,63 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
                     ),
                     child: Row(
                       children: [
+                        if (isMobile)
+                          Builder(
+                            builder: (context) => IconButton(
+                              icon: const Icon(Icons.menu_rounded),
+                              onPressed: () => Scaffold.of(context).openDrawer(),
+                            ),
+                          ),
+                        if (isMobile) const SizedBox(width: 8),
+                        if (isMobile)
+                          const Text(
+                            'PTU',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 18,
+                            ),
+                          ),
                         const Spacer(),
-                        const SizedBox(width: 24),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 8,
-                          ),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF6C5CE7).withAlpha(15),
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: Row(
-                            children: [
-                              const Icon(
-                                Icons.calendar_today,
-                                size: 16,
-                                color: Color(0xFF6C5CE7),
-                              ),
-                              const SizedBox(width: 8),
-                              Text(
-                                'Oct 2026',
-                                style: TextStyle(
-                                  color: const Color(0xFF6C5CE7).withAlpha(200),
-                                  fontWeight: FontWeight.bold,
+                        const SizedBox(width: 8),
+                        if (!isMobile)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 8,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF6C5CE7).withAlpha(15),
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(
+                                  Icons.calendar_today,
+                                  size: 16,
+                                  color: Color(0xFF6C5CE7),
                                 ),
-                              ),
-                            ],
+                                const SizedBox(width: 8),
+                                Text(
+                                  'Oct 2026',
+                                  style: TextStyle(
+                                    color:
+                                        const Color(0xFF6C5CE7).withAlpha(200),
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
-                        ),
-                        const SizedBox(width: 24),
+                        const SizedBox(width: 12),
                         IconButton(
                           icon: const Icon(Icons.notifications_none_rounded),
                           onPressed: () {},
                         ),
-                        IconButton(
-                          icon: const Icon(Icons.settings_outlined),
-                          onPressed: () {},
-                        ),
+                        if (!isMobile)
+                          IconButton(
+                            icon: const Icon(Icons.settings_outlined),
+                            onPressed: () {},
+                          ),
                       ],
                     ),
                   ),
@@ -1357,7 +1290,109 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
         ),
       ),
     );
+  }
 
+  Widget _buildSidebarContent() {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF6C5CE7),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(
+                  Icons.menu_book,
+                  color: Colors.white,
+                  size: 24,
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Text(
+                'PTU_PORTAL',
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: -0.5,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        _buildUserInfo(),
+        const SizedBox(height: 32),
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            children: [
+              const Text(
+                'MENU',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.grey,
+                  letterSpacing: 1.2,
+                ),
+              ),
+              const SizedBox(height: 12),
+              _buildNavItem(
+                Icons.grid_view_rounded,
+                'Dashboard',
+                NavPage.dashboard,
+              ),
+              _buildNavItem(
+                Icons.library_books_rounded,
+                'Courses',
+                NavPage.courses,
+              ),
+              _buildNavItem(
+                Icons.video_camera_front_rounded,
+                'Live Class WebRTC',
+                NavPage.liveClass,
+              ),
+              _buildNavItem(
+                Icons.assignment_rounded,
+                'Assignments',
+                NavPage.assignments,
+              ),
+              _buildNavItem(Icons.quiz_rounded, 'MCQs', NavPage.mcq),
+              _buildNavItem(
+                Icons.person_rounded,
+                'Profile',
+                NavPage.profile,
+              ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: OutlinedButton.icon(
+            onPressed: () {
+              AppData().logout();
+            },
+            icon: const Icon(
+              Icons.logout,
+              size: 18,
+              color: Colors.redAccent,
+            ),
+            label: const Text(
+              'Log Out',
+              style: TextStyle(color: Colors.redAccent),
+            ),
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              side: BorderSide(color: Colors.redAccent.withAlpha(50)),
+              minimumSize: const Size.fromHeight(50),
+            ),
+          ),
+        ),
+      ],
+    );
   }
 
   Widget _buildUserInfo() {
@@ -1412,7 +1447,12 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
-        onTap: () => AppData().setPage(page),
+        onTap: () {
+          AppData().setPage(page);
+          if (MediaQuery.of(context).size.width < 1000) {
+            Navigator.pop(context); // Auto-close drawer on mobile
+          }
+        },
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         tileColor: isSelected
             ? const Color(0xFF6C5CE7).withAlpha(20)
