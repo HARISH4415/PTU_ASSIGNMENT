@@ -1192,7 +1192,6 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
             : null,
         body: Row(
           children: [
-            // Persistent Sidebar (Desktop Only)
             if (!isMobile)
               Container(
                 width: 260,
