@@ -13,6 +13,8 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:excel/excel.dart' as ex;
 import 'dart:typed_data';
+import 'package:http/http.dart' as http;
+import 'api_config.dart';
 import 'auth.dart';
 
 List<CameraDescription> cameras = [];
@@ -216,16 +218,17 @@ class AppData extends ChangeNotifier {
   Map<String, List<String>> assignmentComments = {};
   Map<String, int> mcqScores = {};
   Map<String, Map<int, int>> mcqStudentAnswers = {};
+  Map<String, List<dynamic>> mcqStudentPresentedQuestions = {};
   Map<String, int> assignmentSubmissionCounts = {};
   Map<String, int> assignmentUnsubmitCounts = {};
   Map<String, bool> mcqFlagged = {};
-
   void submitMcqQuiz(
     String assignmentId,
     int score, {
     Map<int, int>? answers,
     bool isMissed = false,
     bool isFlagged = false,
+    List<dynamic>? presentedQuestions,
   }) {
     mcqScores[assignmentId] = score;
     if (isFlagged) {
@@ -233,6 +236,9 @@ class AppData extends ChangeNotifier {
     }
     if (answers != null) {
       mcqStudentAnswers[assignmentId] = answers;
+    }
+    if (presentedQuestions != null) {
+      mcqStudentPresentedQuestions[assignmentId] = presentedQuestions;
     }
     for (var list in classAssignments.values) {
       for (var a in list) {
@@ -247,6 +253,7 @@ class AppData extends ChangeNotifier {
             isFlagged: isFlagged,
             score: score,
             answers: answers,
+            presentedQuestions: presentedQuestions,
             isMcq: true,
           );
           return;
@@ -261,19 +268,26 @@ class AppData extends ChangeNotifier {
     bool isFlagged = false,
     int? score,
     Map<int, int>? answers,
+    List<dynamic>? presentedQuestions,
     bool isMcq = false,
   }) async {
     try {
       final studentId =
           loggedEnrollNo ?? loggedPhone ?? loggedEmail ?? 'unknown';
       if (isMcq) {
+        // Store both responses and the actual questions shown (to handle shuffling/subsets)
+        final studentAnswersData = {
+          'responses': answers?.map((k, v) => MapEntry(k.toString(), v)),
+          'questions': presentedQuestions,
+        };
+
         await supabase.from('student_mcq_results').upsert({
           'mcq_id': assignmentId,
           'student_id': studentId,
           'score': score ?? 0,
           'is_completed': isDone,
           'is_flagged': isFlagged,
-          'student_answers': answers,
+          'student_answers': studentAnswersData,
         }, onConflict: 'student_id, mcq_id');
       } else {
         String? fName;
@@ -869,8 +883,8 @@ class AppData extends ChangeNotifier {
           'id': newId,
           'class_id': classId,
           'title': title,
-          'due_datetime': dueDateTime?.toIso8601String(),
-          'start_datetime': startDateTime?.toIso8601String(),
+          'due_datetime': dueDateTime?.toUtc().toIso8601String(),
+          'start_datetime': startDateTime?.toUtc().toIso8601String(),
           'mcq_data': mcqData,
           'time_per_question': timePerQuestion,
           'random_question_count': questionsToShow,
@@ -901,7 +915,7 @@ class AppData extends ChangeNotifier {
           'class_id': classId,
           'title': title,
           'due_date': dueDate,
-          'due_datetime': dueDateTime?.toIso8601String(),
+          'due_datetime': dueDateTime?.toUtc().toIso8601String(),
           'instructor_file_name': file?.name,
           'year': year,
           'semester': semester,
@@ -971,10 +985,10 @@ class AppData extends ChangeNotifier {
         'title': row['title'],
         'dueDate': row['due_date'] ?? '',
         'dueDateTime': row['due_datetime'] != null
-            ? DateTime.tryParse(row['due_datetime'])
+            ? DateTime.tryParse(row['due_datetime'])?.toLocal()
             : null,
         'startDateTime': row['start_datetime'] != null
-            ? DateTime.tryParse(row['start_datetime'])
+            ? DateTime.tryParse(row['start_datetime'])?.toLocal()
             : null,
         'year': row['year'] ?? 'All',
         'semester': row['semester'] ?? 'All',
@@ -1004,6 +1018,25 @@ class AppData extends ChangeNotifier {
           if (isMcq) {
             mcqScores[aId] = status['score'];
             mcqFlagged[aId] = status['is_flagged'] ?? false;
+            final dynamic rawAns = status['student_answers'];
+            if (rawAns != null) {
+              if (rawAns is Map && rawAns.containsKey('responses')) {
+                // New nested format
+                final Map res = rawAns['responses'] as Map;
+                mcqStudentAnswers[aId] = res.map(
+                  (k, v) => MapEntry(int.parse(k.toString()), v as int),
+                );
+                if (rawAns['questions'] != null) {
+                  mcqStudentPresentedQuestions[aId] =
+                      rawAns['questions'] as List<dynamic>;
+                }
+              } else if (rawAns is Map) {
+                // Legacy flat format (fallback)
+                mcqStudentAnswers[aId] = rawAns.map(
+                  (k, v) => MapEntry(int.parse(k.toString()), v as int),
+                );
+              }
+            }
           }
         }
       }
@@ -4991,9 +5024,9 @@ class _AssignmentInteractionScreenState
   bool _isCameraInitialized = false;
   Timer? _proctoringTimer;
   Timer? _clockTimer;
+  bool _isProctoringInProgress = false;
 
-  get stdId =>
-      null; // Ticks every second so start-time check re-evaluates automatically
+  get stdId => null;
 
   @override
   void initState() {
@@ -5021,6 +5054,9 @@ class _AssignmentInteractionScreenState
           0,
           answers: mcqAnswers,
           isMissed: true,
+          presentedQuestions: _shuffledMcqData.isNotEmpty
+              ? _shuffledMcqData
+              : null,
         );
       });
     }
@@ -5166,33 +5202,87 @@ class _AssignmentInteractionScreenState
     _proctoringTimer?.cancel();
     // Simulate AI detection check every 2 seconds
     // In a real app, you would process camera frames here
-    _proctoringTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
+    _proctoringTimer = Timer.periodic(const Duration(seconds: 3), (
+      timer,
+    ) async {
       if (!_isMcqStartPressed || widget.assignment['isDone'] == true) {
         timer.cancel();
         return;
       }
 
-      // ----------------------------------------------------------------------
-      // PLACEHOLDER FOR MOBILE DETECTION LOGIC
-      // ----------------------------------------------------------------------
-      // Here you would normally run:
-      // final image = await _cameraController?.takePicture();
-      // final result = await myAiModel.detectMobile(image);
-      // ----------------------------------------------------------------------
+      if (_cameraController == null ||
+          !_cameraController!.value.isInitialized ||
+          _isProctoringInProgress)
+        return;
 
-      // For demonstration of the requested logic, we'll simulate a detection
-      // if a certain condition is met (e.g. random chance for testing, or always false by default)
-      bool mobileDetected = false;
+      _isProctoringInProgress = true;
+      try {
+        final image = await _cameraController!.takePicture();
+        final bool phoneDetected = await _detectPhoneWithGrok(image);
 
-      // Mobile detection logic automatically applied for simulation
-      mobileDetected =
-          Random().nextInt(10) >
-          4; // ~50% chance every 2s to trigger warnings much faster
-
-      if (mobileDetected) {
-        _handleMobileDetection();
+        if (phoneDetected) {
+          _handleMobileDetection();
+        }
+      } catch (e) {
+        debugPrint('Proctoring Error: $e');
+      } finally {
+        _isProctoringInProgress = false;
       }
     });
+  }
+
+  Future<bool> _detectPhoneWithGrok(XFile image) async {
+    const String apiKey = grokApiKey;
+    const String apiUrl = 'https://api.x.ai/v1/chat/completions';
+
+    try {
+      final bytes = await image.readAsBytes();
+      final base64Image = base64Encode(bytes);
+
+      final response = await http.post(
+        Uri.parse(apiUrl),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $apiKey',
+        },
+        body: jsonEncode({
+          'model': 'grok-vision-beta',
+          'messages': [
+            {
+              'role': 'user',
+              'content': [
+                {
+                  'type': 'text',
+                  'text':
+                      'ULTRA-STRICT PROCTORING CHECK: Analyze this student camera frame. Is there ANY mobile phone, smartphone, tablet, smartwatch, or electronic device visible? Even a small part of it. If YES, reply only with "YES". If NO, reply only with "NO". Detection is critical for exam integrity.',
+                },
+                {
+                  'type': 'image_url',
+                  'image_url': {'url': 'data:image/jpeg;base64,$base64Image'},
+                },
+              ],
+            },
+          ],
+          'temperature': 0,
+        }),
+      );
+
+      debugPrint('Grok Response Status: ${response.statusCode}');
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final String content = data['choices'][0]['message']['content']
+            .toString()
+            .toUpperCase();
+        debugPrint('Grok Detection Result: $content');
+        return content.contains('YES');
+      } else {
+        debugPrint('Grok Error Body: ${response.body}');
+      }
+      return false;
+    } catch (e) {
+      debugPrint('Grok API Error (Network/Auth): $e');
+      return false;
+    }
   }
 
   void _handleMobileDetection() {
@@ -5261,13 +5351,15 @@ class _AssignmentInteractionScreenState
         ? _shuffledMcqData
         : (widget.assignment['mcqData'] as List<dynamic>);
 
-    if (currentMcqIndex < mcqData.length - 1) {
-      currentMcqIndex++;
-      _startMcqTimer();
-    } else {
-      _mcqTimer?.cancel();
-      _submitMcq();
-    }
+    setState(() {
+      if (currentMcqIndex < mcqData.length - 1) {
+        currentMcqIndex++;
+        _startMcqTimer();
+      } else {
+        _mcqTimer?.cancel();
+        _submitMcq();
+      }
+    });
   }
 
   void _shuffleQuestionsAndOptions() {
@@ -5337,13 +5429,12 @@ class _AssignmentInteractionScreenState
     _mcqTimer?.cancel();
 
     int score = 0;
+    List<dynamic> mcqData = _shuffledMcqData.isNotEmpty
+        ? _shuffledMcqData
+        : (widget.assignment['mcqData'] as List<dynamic>);
 
     // If flagged for cheating (e.g., 3 mobile detections), score is automatically 0
     if (!isFlagged) {
-      List<dynamic> mcqData = _shuffledMcqData.isNotEmpty
-          ? _shuffledMcqData
-          : (widget.assignment['mcqData'] as List<dynamic>);
-
       for (int j = 0; j < mcqData.length; j++) {
         var q = mcqData[j];
         var ans =
@@ -5371,6 +5462,7 @@ class _AssignmentInteractionScreenState
       widget.assignment['id'],
       score,
       answers: mcqAnswers,
+      presentedQuestions: mcqData,
       isFlagged: isFlagged,
     );
   }
@@ -7288,113 +7380,162 @@ class _AssignmentInteractionScreenState
   void _showStudentAnswersDialog(
     BuildContext context,
     String studentName,
-    dynamic answers,
+    dynamic answersData,
   ) {
+    List<dynamic> questionsToShow = [];
     final Map<int, int> studentAnsMap = {};
-    if (answers is Map) {
-      answers.forEach((k, v) {
-        studentAnsMap[int.tryParse(k.toString()) ?? 0] =
-            int.tryParse(v.toString()) ?? 0;
-      });
+
+    if (answersData is Map) {
+      if (answersData.containsKey('questions') &&
+          answersData['questions'] is List) {
+        // Use student-specific question set
+        questionsToShow = answersData['questions'] as List<dynamic>;
+        if (answersData['responses'] is Map) {
+          final res = answersData['responses'] as Map;
+          res.forEach((k, v) {
+            studentAnsMap[int.tryParse(k.toString()) ?? 0] =
+                int.tryParse(v.toString()) ?? 0;
+          });
+        }
+      } else if (answersData is Map && answersData.isNotEmpty) {
+        // Legacy/Default fallback: ONLY show questions if they are in the answer map
+        // If the teacher wants student-only questions, we shouldn't show the whole pool.
+        final allQuestions = widget.assignment['mcqData'] as List<dynamic>;
+        List<dynamic> filtered = [];
+        answersData.forEach((k, v) {
+          int idx = int.tryParse(k.toString()) ?? -1;
+          if (idx >= 0 && idx < allQuestions.length) {
+            filtered.add(allQuestions[idx]);
+            studentAnsMap[filtered.length - 1] =
+                int.tryParse(v.toString()) ?? 0;
+          }
+        });
+        questionsToShow = filtered;
+      }
     }
-    final originalMcqData = widget.assignment['mcqData'] as List<dynamic>;
+
+    // Final fallback: If still empty (e.g. no responses and no questions saved),
+    // show ALL questions from the assignment but as "Not Attempted"
+    if (questionsToShow.isEmpty) {
+      questionsToShow = widget.assignment['mcqData'] as List<dynamic>;
+      // In this case, studentAnsMap remains empty, which correctly identifies questions as unanswered
+    }
 
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text('Answers for $studentName'),
+        title: Text('Review: $studentName'),
         content: SizedBox(
-          width: 500,
-          height: 600,
-          child: ListView.builder(
-            itemCount: originalMcqData.length,
-            itemBuilder: (context, i) {
-              final q = originalMcqData[i];
-              final correctIdx = q['answerIndex'] ?? 0;
-              final studentIdx = studentAnsMap[i];
-              final isCorrect = studentIdx == correctIdx;
+          width: 600,
+          height: 700,
+          child: questionsToShow.isEmpty
+              ? const Center(child: Text('No questions found for this test.'))
+              : ListView.builder(
+                  itemCount: questionsToShow.length,
+                  itemBuilder: (context, i) {
+                    final q = questionsToShow[i];
+                    final correctIdx = q['answerIndex'] ?? 0;
+                    final studentIdx = studentAnsMap[i];
+                    final isCorrect = studentIdx == correctIdx;
+                    final isUnanswered = studentIdx == null;
 
-              return Card(
-                color: Colors.white,
-                margin: const EdgeInsets.only(bottom: 12),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  side: BorderSide(color: Colors.grey.shade200),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Q${i + 1}: ${q['question'] ?? "N/A"}',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16,
-                        ),
+                    return Card(
+                      color: Colors.white,
+                      margin: const EdgeInsets.only(bottom: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        side: BorderSide(color: Colors.grey.shade200),
                       ),
-                      const SizedBox(height: 12),
-                      Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: Colors.green.shade50,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Row(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Icon(
-                              Icons.check_circle,
-                              color: Colors.green,
-                              size: 16,
+                            Text(
+                              'Q${i + 1}: ${q['question'] ?? "N/A"}',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16,
+                              ),
                             ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                'Correct: ${q['options']?[correctIdx] ?? "N/A"}',
-                                style: const TextStyle(
-                                  color: Colors.green,
-                                  fontWeight: FontWeight.bold,
-                                ),
+                            const SizedBox(height: 12),
+                            Container(
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: Colors.green.shade50,
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Row(
+                                children: [
+                                  const Icon(
+                                    Icons.check_circle,
+                                    color: Colors.green,
+                                    size: 16,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      'Correct: ${q['options']?[correctIdx] ?? "N/A"}',
+                                      style: const TextStyle(
+                                        color: Colors.green,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Container(
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: studentIdx == null
+                                    ? Colors.grey.shade100
+                                    : (isCorrect
+                                          ? Colors.green.shade50
+                                          : Colors.red.shade50),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    studentIdx == null
+                                        ? Icons.help_outline
+                                        : (isCorrect
+                                              ? Icons.check_circle
+                                              : Icons.cancel),
+                                    color: studentIdx == null
+                                        ? Colors.orange
+                                        : (isCorrect
+                                              ? Colors.green
+                                              : Colors.red),
+                                    size: 16,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      studentIdx == null
+                                          ? 'Not Attempted'
+                                          : 'Student Selected: ${q['options']?[studentIdx] ?? "N/A"}',
+                                      style: TextStyle(
+                                        color: studentIdx == null
+                                            ? Colors.orange.shade800
+                                            : (isCorrect
+                                                  ? Colors.green
+                                                  : Colors.red),
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                           ],
                         ),
                       ),
-                      const SizedBox(height: 8),
-                      Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: isCorrect
-                              ? Colors.green.shade50
-                              : Colors.red.shade50,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Row(
-                          children: [
-                            Icon(
-                              isCorrect ? Icons.check_circle : Icons.cancel,
-                              color: isCorrect ? Colors.green : Colors.red,
-                              size: 16,
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                'Student Selected: ${studentIdx != null ? (q['options']?[studentIdx] ?? "N/A") : "Not Answered"}',
-                                style: TextStyle(
-                                  color: isCorrect ? Colors.green : Colors.red,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
+                    );
+                  },
                 ),
-              );
-            },
-          ),
         ),
         actions: [
           TextButton(
