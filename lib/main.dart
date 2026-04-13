@@ -6,7 +6,6 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:dotted_border/dotted_border.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -14,10 +13,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:excel/excel.dart' as ex;
 import 'dart:typed_data';
 import 'package:http/http.dart' as http;
-import 'api_config.dart';
 import 'auth.dart';
 
-List<CameraDescription> cameras = [];
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -31,11 +28,7 @@ Future<void> main() async {
   } catch (e) {
     debugPrint('Supabase init failed. Please update the URL and Anon Key.');
   }
-  try {
-    cameras = await availableCameras();
-  } catch (e) {
-    debugPrint('No cameras found: $e');
-  }
+
 
   runApp(const PTU_PORTALApp());
 }
@@ -118,7 +111,9 @@ class AppData extends ChangeNotifier {
   }
 
   UserRole currentUserRole = UserRole.student;
+  NavPage currentPage = NavPage.dashboard;
   String? activeMeetingCode;
+
   bool isLoggedIn = false;
   String? loggedEmail;
   String? loggedPhone;
@@ -135,6 +130,11 @@ class AppData extends ChangeNotifier {
   List<String> activeDepartments = [];
   Map<String, Map<String, dynamic>> currentAssignmentStatuses =
       {}; // student_id -> status_row
+
+  void setPage(NavPage page) {
+    currentPage = page;
+    notifyListeners();
+  }
 
   // Shared state (now dynamic based on department)
   List<Map<String, dynamic>> classes = [];
@@ -445,7 +445,7 @@ class AppData extends ChangeNotifier {
           currentUserRole = UserRole.teacher;
           loggedTeacherId = teacherId;
           loggedName = registeredCheck['name']?.toString();
-          loggedEmail = registeredCheck['email']?.toString();
+
           loggedPhone = registeredCheck['phone']?.toString();
           loggedDepartment = registeredCheck['department']?.toString();
           loggedDesignation = registeredCheck['designation']?.toString();
@@ -551,7 +551,7 @@ class AppData extends ChangeNotifier {
         } catch (_) {}
       }
 
-      if (registeredCheck != null) {
+      if (registeredCheck != null){
         if (registeredCheck['password'] == passwordInput) {
           isLoggedIn = true;
           isRegistrationPending = false;
@@ -559,11 +559,9 @@ class AppData extends ChangeNotifier {
           loggedEnrollNo = enrollNo;
           loggedName = registeredCheck['name']?.toString();
           loggedPhone = registeredCheck['phone']?.toString();
-          loggedEmail = registeredCheck['email']?.toString();
           loggedDepartment = registeredCheck['department']?.toString();
           loggedYear = registeredCheck['year']?.toString();
           loggedSemester = registeredCheck['semester']?.toString();
-          loggedSection = registeredCheck['section']?.toString();
           saveSession();
           notifyListeners();
           loadAssignmentsFromSupabase();
@@ -629,7 +627,6 @@ class AppData extends ChangeNotifier {
     required String teacherId,
     required String name,
     required String phone,
-    required String email,
     required String department,
     required String designation,
     required String year,
@@ -641,7 +638,6 @@ class AppData extends ChangeNotifier {
         'teacher_id': teacherId,
         'name': name,
         'phone': phone,
-        'email': email,
         'department': department,
         'designation': designation,
         'year': year,
@@ -654,7 +650,7 @@ class AppData extends ChangeNotifier {
       isLoggedIn = true;
       loggedTeacherId = teacherId;
       loggedName = name;
-      loggedEmail = email;
+      loggedPhone = phone;
       loggedDepartment = department;
       loggedDesignation = designation;
       loggedYear = year;
@@ -674,7 +670,6 @@ class AppData extends ChangeNotifier {
   Future<String?> updateProfile({
     String? name,
     String? phone,
-    String? email,
     String? year,
     String? semester,
     String? section,
@@ -706,7 +701,6 @@ class AppData extends ChangeNotifier {
 
       Map<String, dynamic> updates = {};
       if (name != null) updates['name'] = name;
-      if (email != null) updates['email'] = email;
       if (year != null) updates['year'] = year;
       if (semester != null) updates['semester'] = semester;
       if (section != null) updates['section'] = section;
@@ -735,7 +729,6 @@ class AppData extends ChangeNotifier {
       // Update local state
       if (name != null) loggedName = name;
       if (phone != null) loggedPhone = phone;
-      if (email != null) loggedEmail = email;
       if (year != null) loggedYear = year;
       if (semester != null) loggedSemester = semester;
       if (section != null) loggedSection = section;
@@ -761,8 +754,6 @@ class AppData extends ChangeNotifier {
     required String department,
     required String year,
     required String semester,
-    required String section,
-    required String email,
     required String password,
   }) async {
     try {
@@ -792,8 +783,6 @@ class AppData extends ChangeNotifier {
         'department': department,
         'year': year,
         'semester': semester,
-        'section': section,
-        'email': email,
         'password': password,
         'is_registered': true,
       });
@@ -804,11 +793,9 @@ class AppData extends ChangeNotifier {
       loggedEnrollNo = enrollNo;
       loggedName = name;
       loggedPhone = phone;
-      loggedEmail = email;
       loggedDepartment = department;
       loggedYear = year;
       loggedSemester = semester;
-      loggedSection = section;
 
       saveSession();
       notifyListeners();
@@ -1187,194 +1174,196 @@ class MainLayoutScreen extends StatefulWidget {
 }
 
 class _MainLayoutScreenState extends State<MainLayoutScreen> {
-  NavPage _currentPage = NavPage.dashboard;
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Row(
-        children: [
-          // Persistent Sidebar
-          Container(
-            width: 260,
-            color: Colors.white,
-            child: Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(24.0),
-                  child: Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF6C5CE7),
-                          borderRadius: BorderRadius.circular(8),
+    return ListenableBuilder(
+      listenable: AppData(),
+      builder: (context, _) => Scaffold(
+        body: Row(
+          children: [
+            // Persistent Sidebar
+            Container(
+              width: 260,
+              color: Colors.white,
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(24.0),
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF6C5CE7),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Icon(
+                            Icons.menu_book,
+                            color: Colors.white,
+                            size: 24,
+                          ),
                         ),
-                        child: const Icon(
-                          Icons.menu_book,
-                          color: Colors.white,
-                          size: 24,
+                        const SizedBox(width: 12),
+                        const Text(
+                          'PTU_PORTAL',
+                          style: TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: -0.5,
+                          ),
                         ),
-                      ),
-                      const SizedBox(width: 12),
-                      const Text(
-                        'PTU_PORTAL',
-                        style: TextStyle(
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: -0.5,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 16),
-                _buildUserInfo(),
-                const SizedBox(height: 32),
-                Expanded(
-                  child: ListView(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    children: [
-                      const Text(
-                        'MENU',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.grey,
-                          letterSpacing: 1.2,
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      _buildNavItem(
-                        Icons.grid_view_rounded,
-                        'Dashboard',
-                        NavPage.dashboard,
-                      ),
-                      _buildNavItem(
-                        Icons.library_books_rounded,
-                        'Courses',
-                        NavPage.courses,
-                      ),
-                      _buildNavItem(
-                        Icons.video_camera_front_rounded,
-                        'Live Class WebRTC',
-                        NavPage.liveClass,
-                      ),
-                      _buildNavItem(
-                        Icons.assignment_rounded,
-                        'Assignments',
-                        NavPage.assignments,
-                      ),
-                      _buildNavItem(Icons.quiz_rounded, 'MCQs', NavPage.mcq),
-                      _buildNavItem(
-                        Icons.person_rounded,
-                        'Profile',
-                        NavPage.profile,
-                      ),
-                    ],
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.all(24.0),
-                  child: OutlinedButton.icon(
-                    onPressed: () {
-                      AppData().logout();
-                    },
-                    icon: const Icon(
-                      Icons.logout,
-                      size: 18,
-                      color: Colors.redAccent,
-                    ),
-                    label: const Text(
-                      'Log Out',
-                      style: TextStyle(color: Colors.redAccent),
-                    ),
-                    style: OutlinedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      side: BorderSide(color: Colors.redAccent.withAlpha(50)),
-                      minimumSize: const Size.fromHeight(50),
+                      ],
                     ),
                   ),
-                ),
-              ],
+                  const SizedBox(height: 16),
+                  _buildUserInfo(),
+                  const SizedBox(height: 32),
+                  Expanded(
+                    child: ListView(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      children: [
+                        const Text(
+                          'MENU',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.grey,
+                            letterSpacing: 1.2,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        _buildNavItem(
+                          Icons.grid_view_rounded,
+                          'Dashboard',
+                          NavPage.dashboard,
+                        ),
+                        _buildNavItem(
+                          Icons.library_books_rounded,
+                          'Courses',
+                          NavPage.courses,
+                        ),
+                        _buildNavItem(
+                          Icons.video_camera_front_rounded,
+                          'Live Class WebRTC',
+                          NavPage.liveClass,
+                        ),
+                        _buildNavItem(
+                          Icons.assignment_rounded,
+                          'Assignments',
+                          NavPage.assignments,
+                        ),
+                        _buildNavItem(Icons.quiz_rounded, 'MCQs', NavPage.mcq),
+                        _buildNavItem(
+                          Icons.person_rounded,
+                          'Profile',
+                          NavPage.profile,
+                        ),
+                      ],
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.all(24.0),
+                    child: OutlinedButton.icon(
+                      onPressed: () {
+                        AppData().logout();
+                      },
+                      icon: const Icon(
+                        Icons.logout,
+                        size: 18,
+                        color: Colors.redAccent,
+                      ),
+                      label: const Text(
+                        'Log Out',
+                        style: TextStyle(color: Colors.redAccent),
+                      ),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        side: BorderSide(color: Colors.redAccent.withAlpha(50)),
+                        minimumSize: const Size.fromHeight(50),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
-
-          // Vertical Divider
-          Container(width: 1, color: Colors.grey.shade200),
-
-          // Main Content Area
-          Expanded(
-            child: Column(
-              children: [
-                // Top Header
-                Container(
-                  height: 80,
-                  padding: const EdgeInsets.symmetric(horizontal: 40),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    border: Border(
-                      bottom: BorderSide(color: Colors.grey.shade200),
+  
+            // Vertical Divider
+            Container(width: 1, color: Colors.grey.shade200),
+  
+            // Main Content Area
+            Expanded(
+              child: Column(
+                children: [
+                  // Top Header
+                  Container(
+                    height: 80,
+                    padding: const EdgeInsets.symmetric(horizontal: 40),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      border: Border(
+                        bottom: BorderSide(color: Colors.grey.shade200),
+                      ),
                     ),
-                  ),
-                  child: Row(
-                    children: [
-                      const Spacer(),
-                      const SizedBox(width: 24),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 8,
-                        ),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF6C5CE7).withAlpha(15),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(
-                              Icons.calendar_today,
-                              size: 16,
-                              color: Color(0xFF6C5CE7),
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              'Oct 2026',
-                              style: TextStyle(
-                                color: const Color(0xFF6C5CE7).withAlpha(200),
-                                fontWeight: FontWeight.bold,
+                    child: Row(
+                      children: [
+                        const Spacer(),
+                        const SizedBox(width: 24),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 8,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF6C5CE7).withAlpha(15),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.calendar_today,
+                                size: 16,
+                                color: Color(0xFF6C5CE7),
                               ),
-                            ),
-                          ],
+                              const SizedBox(width: 8),
+                              Text(
+                                'Oct 2026',
+                                style: TextStyle(
+                                  color: const Color(0xFF6C5CE7).withAlpha(200),
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
-                      ),
-                      const SizedBox(width: 24),
-                      IconButton(
-                        icon: const Icon(Icons.notifications_none_rounded),
-                        onPressed: () {},
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.settings_outlined),
-                        onPressed: () {},
-                      ),
-                    ],
+                        const SizedBox(width: 24),
+                        IconButton(
+                          icon: const Icon(Icons.notifications_none_rounded),
+                          onPressed: () {},
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.settings_outlined),
+                          onPressed: () {},
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                // Dynamic View
-                Expanded(child: ClipRRect(child: _buildBodyContent())),
-              ],
+                  // Dynamic View
+                  Expanded(child: ClipRRect(child: _buildBodyContent())),
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
+
   }
 
   Widget _buildUserInfo() {
     UserRole role = AppData().currentUserRole;
-    String name = role == UserRole.teacher
-        ? (AppData().loggedEmail ?? 'Teacher')
-        : (AppData().loggedName ?? AppData().loggedPhone ?? 'Student');
+    String name = AppData().loggedName ??
+        (role == UserRole.teacher ? 'Teacher' : 'Student');
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24.0),
       child: Row(
@@ -1419,11 +1408,11 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
   }
 
   Widget _buildNavItem(IconData icon, String title, NavPage page) {
-    bool isSelected = _currentPage == page;
+    bool isSelected = AppData().currentPage == page;
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
-        onTap: () => setState(() => _currentPage = page),
+        onTap: () => AppData().setPage(page),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         tileColor: isSelected
             ? const Color(0xFF6C5CE7).withAlpha(20)
@@ -1445,20 +1434,25 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
   }
 
   Widget _buildBodyContent() {
-    switch (_currentPage) {
-      case NavPage.dashboard:
-        return const DashboardView();
-      case NavPage.courses:
-        return const CoursesView();
-      case NavPage.liveClass:
-        return const LiveClassView();
-      case NavPage.assignments:
-        return const AssignmentsView();
-      case NavPage.mcq:
-        return const McqCentralView();
-      case NavPage.profile:
-        return const ProfileView();
-    }
+    return ListenableBuilder(
+      listenable: AppData(),
+      builder: (context, _) {
+        switch (AppData().currentPage) {
+          case NavPage.dashboard:
+            return const DashboardView();
+          case NavPage.courses:
+            return const CoursesView();
+          case NavPage.liveClass:
+            return const LiveClassView();
+          case NavPage.assignments:
+            return const AssignmentsView();
+          case NavPage.mcq:
+            return const McqCentralView();
+          case NavPage.profile:
+            return const ProfileView();
+        }
+      },
+    );
   }
 }
 
@@ -1683,6 +1677,7 @@ class _McqCentralViewState extends State<McqCentralView> {
         ? AppData().filteredClasses.first['id']
         : null;
     List<dynamic>? mcqData;
+    bool isTimed = true;
 
     showDialog(
       context: context,
@@ -1696,8 +1691,9 @@ class _McqCentralViewState extends State<McqCentralView> {
             if (showCount <= 0 || showCount > qCount) showCount = qCount;
 
             int totalSeconds = showCount * timePerQ;
-            String totalTimeStr =
-                '${totalSeconds ~/ 60}m ${totalSeconds % 60}s';
+            String totalTimeStr = isTimed
+                ? '${totalSeconds ~/ 60}m ${totalSeconds % 60}s'
+                : 'No Limit';
 
             return AlertDialog(
               title: const Text('Upload MCQ JSON Test'),
@@ -1729,6 +1725,9 @@ class _McqCentralViewState extends State<McqCentralView> {
                               : null,
                         ),
                         keyboardType: TextInputType.number,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                        ],
                         onChanged: (val) => setDialogState(() {}),
                       ),
                       const SizedBox(height: 16),
@@ -1804,17 +1803,31 @@ class _McqCentralViewState extends State<McqCentralView> {
                         },
                       ),
                       const SizedBox(height: 16),
-                      TextField(
-                        controller: timeCtrl,
-                        decoration: InputDecoration(
-                          labelText: 'Time per question (seconds)',
-                          border: const OutlineInputBorder(),
-                          helperText: 'Total Test Time: $totalTimeStr',
+                      SwitchListTile(
+                        title: const Text('Enable Timer'),
+                        subtitle: const Text(
+                          'Sets a time limit per question',
                         ),
-                        keyboardType: TextInputType.number,
-                        onChanged: (val) => setDialogState(() {}),
+                        value: isTimed,
+                        onChanged: (val) => setDialogState(() => isTimed = val),
+                        activeColor: const Color(0xFF6C5CE7),
                       ),
                       const SizedBox(height: 16),
+                      if (isTimed)
+                        TextField(
+                          controller: timeCtrl,
+                          decoration: InputDecoration(
+                            labelText: 'Time per question (seconds)',
+                            border: const OutlineInputBorder(),
+                            helperText: 'Total Test Time: $totalTimeStr',
+                          ),
+                          keyboardType: TextInputType.number,
+                          inputFormatters: [
+                            FilteringTextInputFormatter.digitsOnly,
+                          ],
+                          onChanged: (val) => setDialogState(() {}),
+                        ),
+                      if (isTimed) const SizedBox(height: 16),
                       OutlinedButton.icon(
                         onPressed: () async {
                           var res = await FilePicker.platform.pickFiles(
@@ -1865,7 +1878,9 @@ class _McqCentralViewState extends State<McqCentralView> {
                         selectedClassId != null &&
                         mcqData != null) {
                       int qCount = mcqData?.length ?? 0;
-                      int timePerQ = int.tryParse(timeCtrl.text) ?? 30;
+                      int timePerQ = isTimed
+                          ? (int.tryParse(timeCtrl.text) ?? 30)
+                          : 0;
 
                       int? questionsToShow = int.tryParse(randomCountCtrl.text);
                       if (questionsToShow != null &&
@@ -1957,10 +1972,11 @@ class ProfileView extends StatelessWidget {
                           'Full Name',
                           AppData().loggedName ?? 'N/A',
                         ),
-                        _buildInfoRow(
-                          'Email Address',
-                          AppData().loggedEmail ?? 'N/A',
-                        ),
+                        if (isTeacher && AppData().loggedEmail != null && AppData().loggedEmail!.isNotEmpty)
+                          _buildInfoRow(
+                            'Email Address',
+                            AppData().loggedEmail!,
+                          ),
                         _buildInfoRow(
                           'Phone Number',
                           AppData().loggedPhone ?? 'N/A',
@@ -1999,10 +2015,7 @@ class ProfileView extends StatelessWidget {
                                 'Current Semester',
                                 AppData().loggedSemester ?? 'N/A',
                               ),
-                              _buildInfoRow(
-                                'Specialization',
-                                'Cloud Computing & AI',
-                              ),
+                              
                             ]
                           : [
                               _buildInfoRow(
@@ -2013,10 +2026,7 @@ class ProfileView extends StatelessWidget {
                                 'Year / Semester',
                                 '${AppData().loggedYear ?? 'N/A'} / ${AppData().loggedSemester ?? 'N/A'}',
                               ),
-                              _buildInfoRow(
-                                'Section',
-                                AppData().loggedSection ?? 'N/A',
-                              ),
+
                             ],
                     ),
                   ],
@@ -2363,11 +2373,9 @@ class ProfileView extends StatelessWidget {
                 onPressed: () async {
                   String? error = await AppData().updateProfile(
                     name: nameCtrl.text.trim(),
-                    email: emailCtrl.text.trim(),
                     phone: phoneCtrl.text.trim(),
                     year: selectedYear,
                     semester: selectedSem,
-                    section: !isTeacher ? sectionCtrl.text.trim() : null,
                     designation: isTeacher ? selectedDesignation : null,
                   );
                   if (error == null) {
@@ -3261,9 +3269,7 @@ class LiveClassView extends StatefulWidget {
 
 class _LiveClassViewState extends State<LiveClassView> {
   bool isMicMuted = false;
-  bool isVideoOff = false;
-  CameraController? _cameraController;
-  bool isCameraInitialized = false;
+  bool isVideoOff = true;
 
   bool isInCall = false;
   bool isChatOpen = true;
@@ -3280,29 +3286,12 @@ class _LiveClassViewState extends State<LiveClassView> {
   @override
   void initState() {
     super.initState();
-    _initCamera();
   }
 
-  Future<void> _initCamera() async {
-    try {
-      final cameras = await availableCameras();
-      if (cameras.isNotEmpty) {
-        final cam = cameras.firstWhere(
-          (c) => c.lensDirection == CameraLensDirection.front,
-          orElse: () => cameras.first,
-        );
-        _cameraController = CameraController(cam, ResolutionPreset.medium);
-        await _cameraController!.initialize();
-        if (mounted) setState(() => isCameraInitialized = true);
-      }
-    } catch (e) {
-      debugPrint('Camera init error: $e');
-    }
-  }
+
 
   @override
   void dispose() {
-    _cameraController?.dispose();
     super.dispose();
   }
 
@@ -3333,17 +3322,19 @@ class _LiveClassViewState extends State<LiveClassView> {
                       ],
                     ),
                     clipBehavior: Clip.antiAlias,
-                    child: isCameraInitialized && !isVideoOff
-                        ? AspectRatio(
-                            aspectRatio: _cameraController!.value.aspectRatio,
-                            child: CameraPreview(_cameraController!),
-                          )
-                        : const Center(
-                            child: Text(
-                              "Camera is starting...",
-                              style: TextStyle(color: Colors.white),
-                            ),
+                    child: const Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.videocam_off, color: Colors.white54, size: 64),
+                          SizedBox(height: 16),
+                          Text(
+                            "Camera module removed",
+                            style: TextStyle(color: Colors.white70),
                           ),
+                        ],
+                      ),
+                    ),
                   ),
                   const SizedBox(height: 32),
                   Row(
@@ -3466,13 +3457,15 @@ class _LiveClassViewState extends State<LiveClassView> {
   }
 
   Widget _buildStudentThumbnail(int i) {
-    if (i == 0 && isCameraInitialized && !isVideoOff) {
+    if (i == 0 && !isVideoOff) {
       return Stack(
         fit: StackFit.expand,
         children: [
-          AspectRatio(
-            aspectRatio: _cameraController!.value.aspectRatio,
-            child: CameraPreview(_cameraController!),
+          Container(
+            color: Colors.grey.shade900,
+            child: const Center(
+              child: Icon(Icons.person, color: Colors.white54, size: 48),
+            ),
           ),
           const Positioned(
             bottom: 12,
@@ -5013,18 +5006,15 @@ class _AssignmentInteractionScreenState
   int _mcqTimeLeft = 30;
   int _tabSwitchCount = 0;
   int _backPressCount = 0;
-  int _mobileWarnings = 0;
+  bool _isNavigatingOut = false;
+
   bool _isWarningDialogShown = false;
   bool _hasTabSwitchPending = false;
   bool _isMcqStartPressed = false;
-  bool _hasPermissions = false;
+
   List<dynamic> _shuffledMcqData = [];
 
-  CameraController? _cameraController;
-  bool _isCameraInitialized = false;
-  Timer? _proctoringTimer;
   Timer? _clockTimer;
-  bool _isProctoringInProgress = false;
 
   get stdId => null;
 
@@ -5037,7 +5027,19 @@ class _AssignmentInteractionScreenState
 
     // Tick every second so the "not started yet" screen auto-unlocks when start time arrives
     _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() {});
+      if (mounted) {
+        setState(() {});
+        // Auto-redirect if deadline passes while on instruction screen
+        if (AppData().currentUserRole == UserRole.student &&
+            !_isNavigatingOut &&
+            !(widget.assignment['isDone'] ?? false)) {
+          DateTime? dueTime = widget.assignment['dueDateTime'];
+          if (dueTime != null && DateTime.now().isAfter(dueTime)) {
+             _isNavigatingOut = true;
+             _submitMcq(); // Auto-saves any progress and redirects
+          }
+        }
+      }
     });
     DateTime? startTime = widget.assignment['startDateTime'];
     DateTime? dueTime = widget.assignment['dueDateTime'];
@@ -5047,17 +5049,9 @@ class _AssignmentInteractionScreenState
         dueTime != null &&
         DateTime.now().isAfter(dueTime)) {
       isTurnedIn = true;
-      // submit automatically as missed
+      // submit automatically as missed or with current progress
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        AppData().submitMcqQuiz(
-          widget.assignment['id'],
-          0,
-          answers: mcqAnswers,
-          isMissed: true,
-          presentedQuestions: _shuffledMcqData.isNotEmpty
-              ? _shuffledMcqData
-              : null,
-        );
+        _submitMcq(); // Correctly calculates score and redirects
       });
     }
 
@@ -5075,9 +5069,7 @@ class _AssignmentInteractionScreenState
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _mcqTimer?.cancel();
-    _proctoringTimer?.cancel();
     _clockTimer?.cancel();
-    _cameraController?.dispose();
     super.dispose();
   }
 
@@ -5169,143 +5161,7 @@ class _AssignmentInteractionScreenState
     );
   }
 
-  Future<void> _initializeCamera() async {
-    try {
-      final cameras = await availableCameras();
-      if (cameras.isEmpty) return;
 
-      // Use front camera if available
-      final frontCam = cameras.firstWhere(
-        (cam) => cam.lensDirection == CameraLensDirection.front,
-        orElse: () => cameras.first,
-      );
-
-      _cameraController = CameraController(
-        frontCam,
-        ResolutionPreset.medium,
-        enableAudio: false,
-      );
-
-      await _cameraController!.initialize();
-      if (mounted) {
-        setState(() {
-          _isCameraInitialized = true;
-        });
-        _startProctoring();
-      }
-    } catch (e) {
-      debugPrint('Camera Error: $e');
-    }
-  }
-
-  void _startProctoring() {
-    _proctoringTimer?.cancel();
-    // Simulate AI detection check every 2 seconds
-    // In a real app, you would process camera frames here
-    _proctoringTimer = Timer.periodic(const Duration(seconds: 3), (
-      timer,
-    ) async {
-      if (!_isMcqStartPressed || widget.assignment['isDone'] == true) {
-        timer.cancel();
-        return;
-      }
-
-      if (_cameraController == null ||
-          !_cameraController!.value.isInitialized ||
-          _isProctoringInProgress)
-        return;
-
-      _isProctoringInProgress = true;
-      try {
-        final image = await _cameraController!.takePicture();
-        final bool phoneDetected = await _detectPhoneWithGrok(image);
-
-        if (phoneDetected) {
-          _handleMobileDetection();
-        }
-      } catch (e) {
-        debugPrint('Proctoring Error: $e');
-      } finally {
-        _isProctoringInProgress = false;
-      }
-    });
-  }
-
-  Future<bool> _detectPhoneWithGrok(XFile image) async {
-    const String apiKey = grokApiKey;
-    const String apiUrl = 'https://api.x.ai/v1/chat/completions';
-
-    try {
-      final bytes = await image.readAsBytes();
-      final base64Image = base64Encode(bytes);
-
-      final response = await http.post(
-        Uri.parse(apiUrl),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $apiKey',
-        },
-        body: jsonEncode({
-          'model': 'grok-vision-beta',
-          'messages': [
-            {
-              'role': 'user',
-              'content': [
-                {
-                  'type': 'text',
-                  'text':
-                      'ULTRA-STRICT PROCTORING CHECK: Analyze this student camera frame. Is there ANY mobile phone, smartphone, tablet, smartwatch, or electronic device visible? Even a small part of it. If YES, reply only with "YES". If NO, reply only with "NO". Detection is critical for exam integrity.',
-                },
-                {
-                  'type': 'image_url',
-                  'image_url': {'url': 'data:image/jpeg;base64,$base64Image'},
-                },
-              ],
-            },
-          ],
-          'temperature': 0,
-        }),
-      );
-
-      debugPrint('Grok Response Status: ${response.statusCode}');
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final String content = data['choices'][0]['message']['content']
-            .toString()
-            .toUpperCase();
-        debugPrint('Grok Detection Result: $content');
-        return content.contains('YES');
-      } else {
-        debugPrint('Grok Error Body: ${response.body}');
-      }
-      return false;
-    } catch (e) {
-      debugPrint('Grok API Error (Network/Auth): $e');
-      return false;
-    }
-  }
-
-  void _handleMobileDetection() {
-    if (_isWarningDialogShown) return;
-
-    _mobileWarnings++;
-    if (_mobileWarnings >= 3) {
-      _showSecurityWarning(
-        'MOBILE DETECTED: This is your 3rd violation. '
-        'The test is being terminated immediately.',
-      );
-      Future.delayed(const Duration(seconds: 3), () {
-        _submitMcq(isFlagged: true);
-      });
-    } else {
-      _isWarningDialogShown = true;
-      _showSecurityWarning(
-        'SECURITY ALERT: A mobile device was detected in your camera frame. '
-        'Warning $_mobileWarnings of 3. Please put away all electronic devices '
-        'or your test will be terminated after 3 warnings.',
-      );
-    }
-  }
 
   Widget _buildInstructionItem(IconData icon, String text, Color color) {
     return Padding(
@@ -5332,7 +5188,12 @@ class _AssignmentInteractionScreenState
 
   void _startMcqTimer() {
     _mcqTimer?.cancel();
-    _mcqTimeLeft = widget.assignment['timePerQuestion'] ?? 30;
+    final timePerQ = widget.assignment['timePerQuestion'] ?? 30;
+    if (timePerQ <= 0) {
+      _mcqTimeLeft = -1;
+      return;
+    }
+    _mcqTimeLeft = timePerQ;
     _mcqTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (mounted) {
         setState(() {
@@ -5465,6 +5326,11 @@ class _AssignmentInteractionScreenState
       presentedQuestions: mcqData,
       isFlagged: isFlagged,
     );
+
+    if (context.mounted) {
+      AppData().setPage(NavPage.dashboard);
+      Navigator.popUntil(context, (route) => route.isFirst);
+    }
   }
 
   Future<void> _pickFiles() async {
@@ -6351,94 +6217,35 @@ class _AssignmentInteractionScreenState
                     ),
                   ),
                   const SizedBox(height: 48),
-                  if (!_hasPermissions)
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        onPressed: () async {
-                          try {
-                            final statuses = await [
-                              Permission.camera,
-                              Permission.microphone,
-                            ].request();
-
-                            // For platforms that do not support permission_handler, it might return permanentlyDenied or not return.
-                            // However, we only block if explicitly denied.
-                            if (statuses[Permission.camera] !=
-                                    PermissionStatus.denied &&
-                                statuses[Permission.camera] !=
-                                    PermissionStatus.permanentlyDenied) {
-                              setState(() {
-                                _hasPermissions = true;
-                              });
-                            } else {
-                              if (mounted) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text(
-                                      'Camera permission is required to take the test.',
-                                    ),
-                                  ),
-                                );
-                              }
-                            }
-                          } catch (e) {
-                            // For unsupported platforms like Windows/Web, we allow them to proceed
-                            // and rely on the Camera plugin's internal permission prompt.
-                            setState(() {
-                              _hasPermissions = true;
-                            });
-                          }
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.orange.shade600,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 24),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16),
-                          ),
-                          elevation: 4,
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: () {
+                        setState(() {
+                          _shuffleQuestionsAndOptions();
+                          _isMcqStartPressed = true;
+                          _startMcqTimer();
+                        });
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: widget.classColor,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 24),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
                         ),
-                        child: const Text(
-                          'Grant Permissions',
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
+                        elevation: 4,
+                        shadowColor: widget.classColor.withAlpha(100),
                       ),
-                    )
-                  else
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        onPressed: () {
-                          setState(() {
-                            _shuffleQuestionsAndOptions();
-                            _isMcqStartPressed = true;
-                            _startMcqTimer();
-                            _initializeCamera();
-                          });
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: widget.classColor,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 24),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16),
-                          ),
-                          elevation: 4,
-                          shadowColor: widget.classColor.withAlpha(100),
-                        ),
-                        child: const Text(
-                          'Start Test Now',
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
+                      child: const Text(
+                        'Start Test Now',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
                         ),
                       ),
                     ),
+                  ),
                 ],
               ),
             ),
@@ -6568,40 +6375,41 @@ class _AssignmentInteractionScreenState
                         ),
                       ),
                     ),
-                    SizedBox(
-                      width: 150,
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.end,
-                        children: [
-                          Icon(
-                            Icons.access_time_filled,
-                            color: widget.classColor.withAlpha(180),
-                            size: 28,
-                          ),
-                          const SizedBox(width: 12),
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                '00:${_mcqTimeLeft.toString().padLeft(2, '0')}',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: Color(0xFF4A4A68),
-                                  fontSize: 16,
+                    if (_mcqTimeLeft >= 0)
+                      SizedBox(
+                        width: 150,
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            Icon(
+                              Icons.access_time_filled,
+                              color: widget.classColor.withAlpha(180),
+                              size: 28,
+                            ),
+                            const SizedBox(width: 12),
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '00:${_mcqTimeLeft.toString().padLeft(2, '0')}',
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    color: Color(0xFF4A4A68),
+                                    fontSize: 16,
+                                  ),
                                 ),
-                              ),
-                              Text(
-                                'Time Left',
-                                style: TextStyle(
-                                  color: Colors.grey.shade400,
-                                  fontSize: 12,
+                                Text(
+                                  'Time Left',
+                                  style: TextStyle(
+                                    color: Colors.grey.shade400,
+                                    fontSize: 12,
+                                  ),
                                 ),
-                              ),
-                            ],
-                          ),
-                        ],
+                              ],
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
                   ],
                 ),
               ),
@@ -6748,7 +6556,7 @@ class _AssignmentInteractionScreenState
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     // Info text about auto-submit at the end
-                    if (currentMcqIndex == mcqData.length - 1)
+                    if (currentMcqIndex == mcqData.length - 1 && _mcqTimeLeft >= 0)
                       Text(
                         'Auto-submitting in $_mcqTimeLeft s...',
                         style: TextStyle(
@@ -6830,122 +6638,8 @@ class _AssignmentInteractionScreenState
             ],
           ),
         ),
-        // Active Camera Preview
-        if (_isCameraInitialized && _cameraController != null)
-          Positioned(
-            bottom: 24,
-            right: 24,
-            child: Container(
-              width: 180,
-              height: 240,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: widget.classColor, width: 2),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withAlpha(20),
-                    blurRadius: 10,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(14),
-                child: Stack(
-                  children: [
-                    CameraPreview(_cameraController!),
-                    Positioned(
-                      top: 8,
-                      left: 8,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 4,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.black54,
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(
-                              Icons.circle,
-                              color: Colors.red,
-                              size: 8,
-                            ),
-                            const SizedBox(width: 4),
-                            const Text(
-                              'LIVE',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 10,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        // Proctoring Status Indicator
-        if (_isMcqStartPressed)
-          Positioned(
-            top: 24,
-            right: 200, // Positioned next to the timer
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: Colors.grey.shade200),
-                boxShadow: [
-                  BoxShadow(color: Colors.black.withAlpha(5), blurRadius: 10),
-                ],
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(
-                    Icons.security_rounded,
-                    size: 16,
-                    color: Colors.green,
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    'AI Proctoring Active',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.green.shade100,
-                    ),
-                  ),
-                  if (_mobileWarnings > 0) ...[
-                    const SizedBox(width: 8),
-                    Container(
-                      width: 1,
-                      height: 16,
-                      color: Colors.grey.shade300,
-                    ),
-                    const SizedBox(width: 8),
-                    Icon(Icons.warning, size: 14, color: Colors.red.shade700),
-                    const SizedBox(width: 4),
-                    Text(
-                      '$_mobileWarnings Warnings',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.red.shade700,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ),
+
+
       ],
     );
   }
@@ -7550,7 +7244,7 @@ class _AssignmentInteractionScreenState
   void _showAllResultsSummaryDialog(BuildContext context) {
     final allStudents = AppData().registeredStudents;
     final statuses = AppData().currentAssignmentStatuses;
-    final originalMcqData = widget.assignment['mcqData'] as List<dynamic>;
+    final originalMcqData = (widget.assignment['mcqData'] as List<dynamic>?) ?? [];
 
     showDialog(
       context: context,
@@ -7578,7 +7272,13 @@ class _AssignmentInteractionScreenState
                 ),
                 DataColumn(
                   label: Text(
-                    'Ans/Skip',
+                    'Ans',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+                DataColumn(
+                  label: Text(
+                    'Skip',
                     style: TextStyle(fontWeight: FontWeight.bold),
                   ),
                 ),
@@ -7614,12 +7314,26 @@ class _AssignmentInteractionScreenState
                 int? score = status?['mcq_score'];
                 bool isFlagged = status?['is_flagged'] ?? false;
 
-                final Map<dynamic, dynamic>? answers = status?['answers'];
-                int answeredCount = answers?.length ?? 0;
-                int totalQuestions = originalMcqData.length;
+                final dynamic rawAnswers = status?['answers'];
+                int answeredCount = 0;
+                int presentedCount = (widget.assignment['questionsToShow'] as int?) ?? originalMcqData.length;
+                if (presentedCount > originalMcqData.length) presentedCount = originalMcqData.length;
+
+                if (rawAnswers is Map) {
+                  if (rawAnswers.containsKey('responses')) {
+                    // Modern format: has 'questions' and 'responses' keys
+                    answeredCount = (rawAnswers['responses'] as Map).length;
+                    presentedCount = (rawAnswers['questions'] as List?)?.length ?? presentedCount;
+                  } else {
+                    // Legacy/Alternative format: Direct index-to-answer map
+                    answeredCount = rawAnswers.length;
+                  }
+                }
+
                 int skippedCount = hasSubmitted
-                    ? (totalQuestions - answeredCount)
+                    ? (presentedCount - answeredCount)
                     : 0;
+                if (skippedCount < 0) skippedCount = 0;
 
                 return DataRow(
                   cells: [
@@ -7648,13 +7362,19 @@ class _AssignmentInteractionScreenState
                     ),
                     DataCell(
                       Text(
-                        hasSubmitted ? '$answeredCount / $skippedCount' : '-',
+                        hasSubmitted ? '$answeredCount' : '-',
                         style: const TextStyle(fontSize: 12),
                       ),
                     ),
                     DataCell(
                       Text(
-                        score != null ? '$score / $totalQuestions' : '-',
+                        hasSubmitted ? '$skippedCount' : '-',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ),
+                    DataCell(
+                      Text(
+                        score != null ? '$score / $presentedCount' : '-',
                         style: const TextStyle(fontSize: 12),
                       ),
                     ),
@@ -7683,7 +7403,7 @@ class _AssignmentInteractionScreenState
                             ? () => _showStudentAnswersDialog(
                                 context,
                                 name,
-                                answers,
+                                rawAnswers,
                               )
                             : null,
                       ),
@@ -7721,12 +7441,25 @@ class _AssignmentInteractionScreenState
                   bool hasSubmitted = status?['is_done'] ?? false;
                   int? score = status?['mcq_score'];
                   bool isFlagged = status?['is_flagged'] ?? false;
-                  final Map<dynamic, dynamic>? answers = status?['answers'];
-                  int answeredCount = answers?.length ?? 0;
-                  int totalQuestions = originalMcqData.length;
+
+                  final dynamic rawAnswers = status?['answers'];
+                  int answeredCount = 0;
+                  int presentedCount = (widget.assignment['questionsToShow'] as int?) ?? originalMcqData.length;
+                  if (presentedCount > originalMcqData.length) presentedCount = originalMcqData.length;
+
+                  if (rawAnswers is Map) {
+                    if (rawAnswers.containsKey('responses')) {
+                      answeredCount = (rawAnswers['responses'] as Map).length;
+                      presentedCount = (rawAnswers['questions'] as List?)?.length ?? presentedCount;
+                    } else {
+                      answeredCount = rawAnswers.length;
+                    }
+                  }
+
                   int skippedCount = hasSubmitted
-                      ? (totalQuestions - answeredCount)
+                      ? (presentedCount - answeredCount)
                       : 0;
+                  if (skippedCount < 0) skippedCount = 0;
 
                   sheet.appendRow([
                     ex.TextCellValue(name),
@@ -7734,7 +7467,7 @@ class _AssignmentInteractionScreenState
                     ex.TextCellValue(hasSubmitted ? "Submitted" : "Pending"),
                     ex.IntCellValue(answeredCount),
                     ex.IntCellValue(skippedCount),
-                    ex.IntCellValue(score ?? 0),
+                    ex.TextCellValue(score != null ? "$score / $presentedCount" : "-"),
                     ex.TextCellValue(isFlagged ? "YES" : "NO"),
                   ]);
                 }

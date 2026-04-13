@@ -232,7 +232,6 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
     text: AppData().loggedName,
   );
   final TextEditingController _phoneController = TextEditingController();
-  final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passController = TextEditingController();
   bool _isLoading = false;
   bool _isPasswordVisible = false;
@@ -241,7 +240,7 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
   String? _selectedDepartment;
   String? _selectedYear;
   String? _selectedSemester;
-  String? _selectedSection;
+
   DateTime? _selectedDob;
 
   // Options
@@ -267,7 +266,7 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
     '4th Year': ['7', '8'],
   };
 
-  final List<String> _sections = ['A', 'B', 'C', 'D', 'E'];
+
 
   Future<void> _pickDob() async {
     final now = DateTime.now();
@@ -309,8 +308,6 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
         department: _selectedDepartment ?? '',
         year: _selectedYear ?? '',
         semester: _selectedSemester ?? '',
-        section: _selectedSection ?? '',
-        email: _emailController.text.trim(),
         password: _passController.text.trim(),
       );
       setState(() => _isLoading = false);
@@ -412,22 +409,7 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
                   ),
                   const SizedBox(height: 16),
 
-                  // Email
-                  _buildRegLabel('Email Address'),
-                  TextFormField(
-                    controller: _emailController,
-                    keyboardType: TextInputType.emailAddress,
-                    decoration: _inputDeco(
-                      Icons.email_outlined,
-                      hint: 'e.g. student@ptu.edu',
-                    ),
-                    validator: (v) {
-                      if (v == null || v.isEmpty) return 'Required';
-                      if (!v.contains('@')) return 'Enter a valid email';
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: 8),
+
 
                   // Date of Birth
                   _buildRegLabel('Date of Birth'),
@@ -543,23 +525,7 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
                   ),
                   const SizedBox(height: 16),
 
-                  // Section
-                  _buildRegLabel('Section'),
-                  DropdownButtonFormField<String>(
-                    value: _selectedSection,
-                    decoration: _inputDeco(Icons.group_outlined),
-                    hint: const Text('Select Section'),
-                    items:
-                        _sections
-                            .map(
-                              (s) =>
-                                  DropdownMenuItem(value: s, child: Text(s)),
-                            )
-                            .toList(),
-                    onChanged: (val) => setState(() => _selectedSection = val),
-                    validator: (v) => v == null ? 'Please select' : null,
-                  ),
-                  const SizedBox(height: 16),
+
 
                   // Password
                   _buildRegLabel('Create New Password'),
@@ -660,9 +626,6 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
     text: AppData().loggedName,
   );
   final TextEditingController _phoneController = TextEditingController();
-  final TextEditingController _emailController = TextEditingController(
-    text: AppData().loggedEmail,
-  );
   final TextEditingController _passController = TextEditingController();
   bool _isLoading = false;
   bool _isPasswordVisible = false;
@@ -701,7 +664,6 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
         teacherId: AppData().loggedTeacherId ?? '',
         name: _nameController.text.trim(),
         phone: _phoneController.text.trim(),
-        email: _emailController.text.trim(),
         department: _selectedDepartment ?? '',
         designation: _selectedDesignation ?? '',
         year: _selectedYear ?? '',
@@ -780,13 +742,7 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
                   ),
                   const SizedBox(height: 16),
 
-                  _buildRegLabel('Email Address'),
-                  TextFormField(
-                    controller: _emailController,
-                    decoration: _inputDecoIcon(Icons.email_outlined),
-                    validator: (v) => v!.isEmpty ? 'Required' : null,
-                  ),
-                  const SizedBox(height: 16),
+
 
                   _buildRegLabel('Phone Number'),
                   TextFormField(
