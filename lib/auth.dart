@@ -245,16 +245,14 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
 
   // Options
   final List<String> _departments = [
-    'Computer Science & Engineering',
-    'Information Technology',
-    'Electronics & Communication',
-    'Electrical Engineering',
-    'Mechanical Engineering',
-    'Civil Engineering',
-    'Chemical Engineering',
-    'Biotechnology',
-    'Mathematics & Computing',
-    'Physics',
+    'Marketing',
+    'Finance',
+    'International Business',
+    'Human Resource Management',
+    'General',
+    'Hospital Management',
+    'Tourism',
+    'Operations & Supply Chain Management',
   ];
 
   final List<String> _years = ['1st Year', '2nd Year', '3rd Year', '4th Year'];
@@ -636,14 +634,14 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
   String? _selectedSemester;
 
   final List<String> _departments = [
-    'Computer Science & Engineering',
-    'Information Technology',
-    'Electronics & Communication',
-    'Electrical Engineering',
-    'Mechanical Engineering',
-    'Civil Engineering',
-    'Physics',
-    'Mathematics',
+    'Marketing',
+    'Finance',
+    'International Business',
+    'Human Resource Management',
+    'General',
+    'Hospital Management',
+    'Tourism',
+    'Operations & Supply Chain Management',
   ];
 
   final List<String> _designations = [

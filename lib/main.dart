@@ -15,7 +15,6 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'auth.dart';
 
-
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -28,7 +27,6 @@ Future<void> main() async {
   } catch (e) {
     debugPrint('Supabase init failed. Please update the URL and Anon Key.');
   }
-
 
   runApp(const PTU_PORTALApp());
 }
@@ -59,6 +57,10 @@ class AppData extends ChangeNotifier {
     loadSession();
   }
 
+  List<String> teacherCustomCourses = [];
+  Map<String, Map<String, dynamic>> currentAssignmentStatuses =
+      {}; // student_id -> status_row
+
   Future<void> saveSession() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('isLoggedIn', isLoggedIn);
@@ -74,6 +76,7 @@ class AppData extends ChangeNotifier {
     await prefs.setString('loggedSemester', loggedSemester ?? '');
     await prefs.setString('loggedSection', loggedSection ?? '');
     await prefs.setBool('isRegistrationPending', isRegistrationPending);
+    await prefs.setStringList('teacherCustomCourses', teacherCustomCourses);
   }
 
   Future<void> loadSession() async {
@@ -99,15 +102,33 @@ class AppData extends ChangeNotifier {
       loggedSemester = prefs.getString('loggedSemester');
       loggedSection = prefs.getString('loggedSection');
       isRegistrationPending = prefs.getBool('isRegistrationPending') ?? false;
+      teacherCustomCourses = prefs.getStringList('teacherCustomCourses') ?? [];
 
       notifyListeners();
       loadAssignmentsFromSupabase();
+      fetchPredefinedCourses();
+      if (currentUserRole == UserRole.teacher) {
+        _fetchTeacherMappingFromSupabase();
+      }
     }
   }
 
-  Future<void> clearSession() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.clear();
+  Future<void> _fetchTeacherMappingFromSupabase() async {
+    if (loggedTeacherId == null) return;
+    try {
+      final res = await supabase
+          .from('teacher_subject_mapping')
+          .select('subjects')
+          .eq('teacher_id', loggedTeacherId!)
+          .maybeSingle();
+      if (res != null && res['subjects'] != null) {
+        teacherCustomCourses = List<String>.from(res['subjects']);
+        saveSession();
+        notifyListeners();
+      }
+    } catch (e) {
+      debugPrint('Error fetching teacher mapping: $e');
+    }
   }
 
   UserRole currentUserRole = UserRole.student;
@@ -128,8 +149,85 @@ class AppData extends ChangeNotifier {
   bool isRegistrationPending = false;
   List<Map<String, dynamic>> registeredStudents = [];
   List<String> activeDepartments = [];
-  Map<String, Map<String, dynamic>> currentAssignmentStatuses =
-      {}; // student_id -> status_row
+  List<Map<String, dynamic>> enrolledStudents = [];
+
+  Future<void> fetchStudentsByDepartment(String dept) async {
+    try {
+      final data = await supabase
+          .from('student_registered_details')
+          .select()
+          .eq('department', dept);
+      enrolledStudents = List<Map<String, dynamic>>.from(data);
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Error fetching students by dept: $e');
+    }
+  }
+
+  Future<void> clearSession() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.clear();
+  }
+
+  List<String> predefinedCourses = [
+    'Marketing',
+    'Finance',
+    'International Business',
+    'Human Resource Management',
+    'General',
+    'Hospital Management',
+    'Tourism',
+    'Operations & Supply Chain Management',
+  ];
+
+  Future<void> fetchPredefinedCourses() async {
+    try {
+      final data = await supabase.from('courses_master').select('name');
+      if (data != null) {
+        predefinedCourses = (data as List)
+            .map((e) => e['name'].toString())
+            .toList();
+        notifyListeners();
+      }
+    } catch (e) {
+      debugPrint('Error fetching courses_master: $e');
+      // Keep hardcoded defaults if fetch fails
+    }
+  }
+
+  void addTeacherCourse(String courseName) {
+    if (!teacherCustomCourses.contains(courseName)) {
+      teacherCustomCourses.add(courseName);
+      saveSession();
+      syncTeacherCoursesToSupabase();
+      notifyListeners();
+    }
+  }
+
+  void removeTeacherCourse(String courseName) {
+    if (teacherCustomCourses.contains(courseName)) {
+      teacherCustomCourses.remove(courseName);
+      saveSession();
+      syncTeacherCoursesToSupabase();
+      notifyListeners();
+    }
+  }
+
+  Future<void> syncTeacherCoursesToSupabase() async {
+    if (currentUserRole != UserRole.teacher || loggedTeacherId == null) return;
+    try {
+      await supabase.from('teacher_subject_mapping').upsert({
+        'teacher_id': loggedTeacherId,
+        'name': loggedName,
+        'department': loggedDepartment,
+        'designation': loggedDesignation,
+        'subjects': teacherCustomCourses,
+        'updated_at': DateTime.now().toIso8601String(),
+      });
+    } catch (e) {
+      debugPrint('Error syncing teacher subjects: $e');
+    }
+  }
 
   void setPage(NavPage page) {
     currentPage = page;
@@ -143,9 +241,12 @@ class AppData extends ChangeNotifier {
     if (!isLoggedIn) return [];
 
     if (currentUserRole == UserRole.teacher) {
-      String? dept = loggedDepartment;
-      if (dept == null || dept.isEmpty) return [];
-      return [_buildClassNode(dept)];
+      List<String> myDepts = [];
+      if (loggedDepartment != null && loggedDepartment!.isNotEmpty) {
+        myDepts.add(loggedDepartment!);
+      }
+      myDepts.addAll(teacherCustomCourses);
+      return myDepts.toSet().map((d) => _buildClassNode(d)).toList();
     } else {
       // Students see all active departments
       if (activeDepartments.isEmpty) {
@@ -176,6 +277,18 @@ class AppData extends ChangeNotifier {
       courseColor = Colors.red.shade600;
     } else if (dept.toLowerCase().contains('civil')) {
       courseColor = Colors.brown.shade500;
+    } else if (dept.toLowerCase().contains('marketing')) {
+      courseColor = Colors.pink.shade400;
+    } else if (dept.toLowerCase().contains('business') ||
+        dept.toLowerCase().contains('management')) {
+      courseColor = const Color(0xFF6C5CE7); // Brand Primary
+    } else if (dept.toLowerCase().contains('hospital')) {
+      courseColor = Colors.cyan.shade600;
+    } else if (dept.toLowerCase().contains('tourism')) {
+      courseColor = Colors.amber.shade700;
+    } else if (dept.toLowerCase().contains('supply chain') ||
+        dept.toLowerCase().contains('operations')) {
+      courseColor = Colors.deepPurple.shade400;
     }
 
     return {
@@ -184,6 +297,8 @@ class AppData extends ChangeNotifier {
       'subtitle': currentUserRole == UserRole.teacher
           ? 'Prof. $loggedName'
           : 'Faculty Course',
+      'teacherName': loggedName ?? 'N/A',
+      'teacherDesignation': loggedDesignation ?? 'Professor',
       'color': courseColor,
       'progress': 0.50,
       'time': '00:00:00',
@@ -410,6 +525,23 @@ class AppData extends ChangeNotifier {
     }
   }
 
+  Future<void> allowStudentReattempt(
+    String assignmentId,
+    String studentId,
+  ) async {
+    try {
+      await supabase.from('student_mcq_results').delete().match({
+        'mcq_id': assignmentId,
+        'student_id': studentId,
+      });
+
+      // Refresh data for teacher
+      fetchAssignmentStatusesForTeacher(assignmentId, isMcq: true);
+    } catch (e) {
+      debugPrint('Error enabling re-attempt: $e');
+    }
+  }
+
   void loginAs(UserRole role) {
     currentUserRole = role;
     notifyListeners();
@@ -551,7 +683,7 @@ class AppData extends ChangeNotifier {
         } catch (_) {}
       }
 
-      if (registeredCheck != null){
+      if (registeredCheck != null) {
         if (registeredCheck['password'] == passwordInput) {
           isLoggedIn = true;
           isRegistrationPending = false;
@@ -1174,7 +1306,6 @@ class MainLayoutScreen extends StatefulWidget {
 }
 
 class _MainLayoutScreenState extends State<MainLayoutScreen> {
-
   @override
   Widget build(BuildContext context) {
     double width = MediaQuery.of(context).size.width;
@@ -1224,7 +1355,8 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
                           Builder(
                             builder: (context) => IconButton(
                               icon: const Icon(Icons.menu_rounded),
-                              onPressed: () => Scaffold.of(context).openDrawer(),
+                              onPressed: () =>
+                                  Scaffold.of(context).openDrawer(),
                             ),
                           ),
                         if (isMobile) const SizedBox(width: 8),
@@ -1259,8 +1391,9 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
                                 Text(
                                   'Oct 2026',
                                   style: TextStyle(
-                                    color:
-                                        const Color(0xFF6C5CE7).withAlpha(200),
+                                    color: const Color(
+                                      0xFF6C5CE7,
+                                    ).withAlpha(200),
                                     fontWeight: FontWeight.bold,
                                   ),
                                 ),
@@ -1360,11 +1493,7 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
                 NavPage.assignments,
               ),
               _buildNavItem(Icons.quiz_rounded, 'MCQs', NavPage.mcq),
-              _buildNavItem(
-                Icons.person_rounded,
-                'Profile',
-                NavPage.profile,
-              ),
+              _buildNavItem(Icons.person_rounded, 'Profile', NavPage.profile),
             ],
           ),
         ),
@@ -1374,11 +1503,7 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
             onPressed: () {
               AppData().logout();
             },
-            icon: const Icon(
-              Icons.logout,
-              size: 18,
-              color: Colors.redAccent,
-            ),
+            icon: const Icon(Icons.logout, size: 18, color: Colors.redAccent),
             label: const Text(
               'Log Out',
               style: TextStyle(color: Colors.redAccent),
@@ -1396,7 +1521,8 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
 
   Widget _buildUserInfo() {
     UserRole role = AppData().currentUserRole;
-    String name = AppData().loggedName ??
+    String name =
+        AppData().loggedName ??
         (role == UserRole.teacher ? 'Teacher' : 'Student');
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24.0),
@@ -1506,6 +1632,9 @@ class _McqCentralViewState extends State<McqCentralView> {
   @override
   Widget build(BuildContext context) {
     bool isTeacher = AppData().currentUserRole == UserRole.teacher;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isMobile = screenWidth < 800;
+
     // Flatten assignments that have mcqData
     List<Map<String, dynamic>> allMcqTests = [];
     for (var cls in AppData().filteredClasses) {
@@ -1520,37 +1649,68 @@ class _McqCentralViewState extends State<McqCentralView> {
     return Scaffold(
       backgroundColor: Colors.transparent,
       body: Padding(
-        padding: const EdgeInsets.all(40.0),
+        padding: EdgeInsets.all(isMobile ? 12.0 : 40.0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  isTeacher ? 'MCQ Tests To Review' : 'Your MCQ Tests To-Do',
-                  style: const TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                if (isTeacher)
-                  ElevatedButton.icon(
-                    onPressed: () => _openCreateMcqTestDialog(context),
-                    icon: const Icon(Icons.add),
-                    label: const Text('Upload New MCQ JSON Test'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF6C5CE7),
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 24,
-                        vertical: 16,
+            isMobile
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        isTeacher ? 'Review MCQs' : 'MCQs To-Do',
+                        style: const TextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
-                    ),
+                      if (isTeacher) ...[
+                        const SizedBox(height: 12),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            onPressed: () => _openCreateMcqTestDialog(context),
+                            icon: const Icon(Icons.add, size: 18),
+                            label: const Text('Upload MCQ JSON'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF6C5CE7),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  )
+                : Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        isTeacher
+                            ? 'MCQ Tests To Review'
+                            : 'Your MCQ Tests To-Do',
+                        style: const TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      if (isTeacher)
+                        ElevatedButton.icon(
+                          onPressed: () => _openCreateMcqTestDialog(context),
+                          icon: const Icon(Icons.add),
+                          label: const Text('Upload New MCQ JSON Test'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF6C5CE7),
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 24,
+                              vertical: 16,
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
-              ],
-            ),
-            const SizedBox(height: 32),
+            SizedBox(height: isMobile ? 16 : 32),
             Expanded(
               child: allMcqTests.isEmpty
                   ? const Center(
@@ -1567,7 +1727,7 @@ class _McqCentralViewState extends State<McqCentralView> {
                         var a = item['assignment'];
 
                         return Card(
-                          margin: const EdgeInsets.only(bottom: 16),
+                          margin: const EdgeInsets.only(bottom: 12),
                           elevation: 0,
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(16),
@@ -1582,23 +1742,25 @@ class _McqCentralViewState extends State<McqCentralView> {
                                   builder: (_) => AssignmentInteractionScreen(
                                     assignment: a,
                                     classColor: cls['color'],
+                                    classData: cls,
                                   ),
                                 ),
                               );
                             },
                             child: Padding(
-                              padding: const EdgeInsets.all(24.0),
+                              padding: EdgeInsets.all(isMobile ? 16.0 : 24.0),
                               child: Row(
                                 children: [
                                   CircleAvatar(
-                                    radius: 24,
+                                    radius: isMobile ? 20 : 24,
                                     backgroundColor: cls['color'].withAlpha(20),
                                     child: Icon(
                                       Icons.quiz,
                                       color: cls['color'],
+                                      size: isMobile ? 20 : 24,
                                     ),
                                   ),
-                                  const SizedBox(width: 24),
+                                  const SizedBox(width: 16),
                                   Expanded(
                                     child: Column(
                                       crossAxisAlignment:
@@ -1606,49 +1768,67 @@ class _McqCentralViewState extends State<McqCentralView> {
                                       children: [
                                         Text(
                                           a['title'],
-                                          style: const TextStyle(
-                                            fontSize: 18,
+                                          style: TextStyle(
+                                            fontSize: isMobile ? 16 : 18,
                                             fontWeight: FontWeight.bold,
                                           ),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
                                         ),
                                         const SizedBox(height: 4),
                                         Text(
-                                          '${cls['title']}\nStart: ${a['startDateTime']?.toString().substring(0, 16) ?? 'N/A'}  •  End: ${a['dueDateTime']?.toString().substring(0, 16) ?? a['dueDate']}  •  ${a['questionsToShow'] ?? a['mcqData'].length} Questions${a['questionsToShow'] != null ? ' (Randomly selected from ${a['mcqData'].length})' : ''}',
+                                          '${cls['title']}\nExpires: ${a['dueDateTime']?.toString().substring(0, 16) ?? a['dueDate']}',
                                           style: TextStyle(
                                             color: Colors.grey.shade600,
+                                            fontSize: isMobile ? 12 : 14,
                                           ),
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
                                         ),
                                       ],
                                     ),
                                   ),
                                   if (isTeacher)
-                                    Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Text(
-                                          '${AppData().registeredStudents.length} Assigned',
-                                          style: const TextStyle(
-                                            color: Color(0xFF6C5CE7),
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 12),
-                                        IconButton(
-                                          icon: const Icon(
-                                            Icons.delete_outline,
-                                            color: Colors.red,
-                                          ),
-                                          tooltip: 'Delete Test',
-                                          onPressed: () {
-                                            _showDeleteConfirmation(
-                                              context,
-                                              cls['id'],
-                                              a['id'],
-                                            );
-                                          },
-                                        ),
-                                      ],
-                                    )
+                                    isMobile
+                                        ? IconButton(
+                                            icon: const Icon(
+                                              Icons.delete_outline,
+                                              color: Colors.red,
+                                              size: 20,
+                                            ),
+                                            onPressed: () =>
+                                                _showDeleteConfirmation(
+                                                  context,
+                                                  cls['id'],
+                                                  a['id'],
+                                                ),
+                                          )
+                                        : Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              const Text(
+                                                'Assigned',
+                                                style: TextStyle(
+                                                  color: Color(0xFF6C5CE7),
+                                                  fontWeight: FontWeight.w600,
+                                                  fontSize: 13,
+                                                ),
+                                              ),
+                                              const SizedBox(width: 8),
+                                              IconButton(
+                                                icon: const Icon(
+                                                  Icons.delete_outline,
+                                                  color: Colors.red,
+                                                ),
+                                                onPressed: () =>
+                                                    _showDeleteConfirmation(
+                                                      context,
+                                                      cls['id'],
+                                                      a['id'],
+                                                    ),
+                                              ),
+                                            ],
+                                          )
                                   else
                                     a['isDone']
                                         ? const Icon(
@@ -1705,269 +1885,374 @@ class _McqCentralViewState extends State<McqCentralView> {
   }
 
   void _openCreateMcqTestDialog(BuildContext context) {
-    TextEditingController titleCtrl = TextEditingController();
-    TextEditingController timeCtrl = TextEditingController(text: '30');
-    TextEditingController randomCountCtrl = TextEditingController();
-    DateTime startDateTime = DateTime.now();
-    DateTime endDateTime = DateTime.now().add(const Duration(minutes: 30));
+    // Forenoon Controllers
+    TextEditingController titleCtrlFN = TextEditingController();
+    TextEditingController timeCtrlFN = TextEditingController(text: '30');
+    TextEditingController randomCountCtrlFN = TextEditingController();
+    bool isTimedFN = true;
+    DateTime startFN = DateTime.now().copyWith(hour: 9, minute: 0);
+    DateTime endFN = DateTime.now().copyWith(hour: 12, minute: 0);
+    List<dynamic>? mcqDataFN;
+
+    // Afternoon Controllers
+    TextEditingController titleCtrlAN = TextEditingController();
+    TextEditingController timeCtrlAN = TextEditingController(text: '30');
+    TextEditingController randomCountCtrlAN = TextEditingController();
+    bool isTimedAN = true;
+    DateTime startAN = DateTime.now().copyWith(hour: 14, minute: 0);
+    DateTime endAN = DateTime.now().copyWith(hour: 17, minute: 0);
+    List<dynamic>? mcqDataAN;
+    String? selectedClassIdFN;
+    String? selectedClassIdAN;
+
     String selectedYear = AppData().loggedYear ?? 'All';
     String selectedSem = AppData().loggedSemester ?? 'All';
     String? selectedClassId = AppData().filteredClasses.isNotEmpty
         ? AppData().filteredClasses.first['id']
         : null;
-    List<dynamic>? mcqData;
-    bool isTimed = true;
 
     showDialog(
       context: context,
       builder: (ctx) {
         return StatefulBuilder(
           builder: (ctx, setDialogState) {
-            int qCount = mcqData?.length ?? 0;
-            int timePerQ = int.tryParse(timeCtrl.text) ?? 30;
-
-            int showCount = int.tryParse(randomCountCtrl.text) ?? qCount;
-            if (showCount <= 0 || showCount > qCount) showCount = qCount;
-
-            int totalSeconds = showCount * timePerQ;
-            String totalTimeStr = isTimed
-                ? '${totalSeconds ~/ 60}m ${totalSeconds % 60}s'
-                : 'No Limit';
+            bool hasFN = mcqDataFN != null;
+            bool hasAN = mcqDataAN != null;
 
             return AlertDialog(
-              title: const Text('Upload MCQ JSON Test'),
-              content: SizedBox(
-                width: 400,
-                child: SingleChildScrollView(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      TextField(
-                        controller: titleCtrl,
-                        decoration: const InputDecoration(
-                          labelText: 'MCQ Test Title',
-                          border: OutlineInputBorder(),
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      TextField(
-                        controller: randomCountCtrl,
-                        decoration: InputDecoration(
-                          labelText: 'Questions to randomly select',
-                          border: const OutlineInputBorder(),
-                          hintText: qCount > 0
-                              ? 'Max: $qCount'
-                              : 'Upload JSON first',
-                          helperText: qCount > 0
-                              ? 'Leave empty to share all $qCount questions'
-                              : null,
-                        ),
-                        keyboardType: TextInputType.number,
-                        inputFormatters: [
-                          FilteringTextInputFormatter.digitsOnly,
-                        ],
-                        onChanged: (val) => setDialogState(() {}),
-                      ),
-                      const SizedBox(height: 16),
-                      ListTile(
-                        shape: RoundedRectangleBorder(
-                          side: BorderSide(color: Colors.grey.shade400),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        title: Text(
-                          'Start: ${_formatDateTime12h(startDateTime)}',
-                        ),
-                        trailing: const Icon(Icons.calendar_month),
-                        onTap: () async {
-                          DateTime? date = await showDatePicker(
-                            context: ctx,
-                            initialDate: startDateTime,
-                            firstDate: DateTime.now(),
-                            lastDate: DateTime(2030),
-                          );
-                          if (date != null) {
-                            TimeOfDay? time = await showTimePicker(
-                              context: ctx,
-                              initialTime: TimeOfDay.fromDateTime(
-                                startDateTime,
-                              ),
-                            );
-                            if (time != null) {
-                              setDialogState(() {
-                                startDateTime = DateTime(
-                                  date.year,
-                                  date.month,
-                                  date.day,
-                                  time.hour,
-                                  time.minute,
-                                );
-                              });
-                            }
-                          }
-                        },
-                      ),
-                      const SizedBox(height: 16),
-                      ListTile(
-                        shape: RoundedRectangleBorder(
-                          side: BorderSide(color: Colors.grey.shade400),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        title: Text('End: ${_formatDateTime12h(endDateTime)}'),
-                        trailing: const Icon(Icons.calendar_month),
-                        onTap: () async {
-                          DateTime? date = await showDatePicker(
-                            context: ctx,
-                            initialDate: endDateTime,
-                            firstDate: startDateTime,
-                            lastDate: DateTime(2030),
-                          );
-                          if (date != null) {
-                            TimeOfDay? time = await showTimePicker(
-                              context: ctx,
-                              initialTime: TimeOfDay.fromDateTime(endDateTime),
-                            );
-                            if (time != null) {
-                              setDialogState(() {
-                                endDateTime = DateTime(
-                                  date.year,
-                                  date.month,
-                                  date.day,
-                                  time.hour,
-                                  time.minute,
-                                );
-                              });
-                            }
-                          }
-                        },
-                      ),
-                      const SizedBox(height: 16),
-                      SwitchListTile(
-                        title: const Text('Enable Timer'),
-                        subtitle: const Text(
-                          'Sets a time limit per question',
-                        ),
-                        value: isTimed,
-                        onChanged: (val) => setDialogState(() => isTimed = val),
-                        activeColor: const Color(0xFF6C5CE7),
-                      ),
-                      const SizedBox(height: 16),
-                      if (isTimed)
-                        TextField(
-                          controller: timeCtrl,
-                          decoration: InputDecoration(
-                            labelText: 'Time per question (seconds)',
-                            border: const OutlineInputBorder(),
-                            helperText: 'Total Test Time: $totalTimeStr',
+              backgroundColor: const Color(0xFFF8F9FE),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(28),
+              ),
+              titlePadding: EdgeInsets.zero,
+              title: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 32,
+                  vertical: 24,
+                ),
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [Color(0xFF6C5CE7), Color(0xFFA29BFE)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                  borderRadius: BorderRadius.only(
+                    topLeft: Radius.circular(28),
+                    topRight: Radius.circular(28),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    const CircleAvatar(
+                      backgroundColor: Colors.white24,
+                      child: Icon(Icons.auto_awesome, color: Colors.white),
+                    ),
+                    const SizedBox(width: 16),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Configure MCQ Sessions',
+                          style: GoogleFonts.outfit(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 22,
                           ),
-                          keyboardType: TextInputType.number,
-                          inputFormatters: [
-                            FilteringTextInputFormatter.digitsOnly,
+                        ),
+                        Text(
+                          'Set up independent batches for the same test',
+                          style: GoogleFonts.outfit(
+                            color: Colors.white70,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w400,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const Spacer(),
+                    IconButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      icon: const Icon(Icons.close, color: Colors.white70),
+                    ),
+                  ],
+                ),
+              ),
+              content: SizedBox(
+                width: 900,
+                child: SingleChildScrollView(
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 24.0),
+                    child: Column(
+                      children: [
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            // FORENOON CARD
+                            Expanded(
+                              child: _buildAdvancedSessionCard(
+                                label: 'FORENOON BATCH',
+                                sublabel: 'AM Session',
+                                icon: Icons.wb_sunny_rounded,
+                                themeColor: const Color(0xFF6C5CE7),
+                                data: mcqDataFN,
+                                titleCtrl: titleCtrlFN,
+                                randomCtrl: randomCountCtrlFN,
+                                timeCtrl: timeCtrlFN,
+                                isTimed: isTimedFN,
+                                start: startFN,
+                                end: endFN,
+                                onToggleTimed: () => setDialogState(
+                                  () => isTimedFN = !isTimedFN,
+                                ),
+                                onPickFile: () async {
+                                  var res = await _pickMcqJson();
+                                  if (res != null) {
+                                    setDialogState(() {
+                                      mcqDataFN = res;
+                                      if (titleCtrlFN.text.isEmpty)
+                                        titleCtrlFN.text = 'Forenoon MCQ';
+                                    });
+                                  }
+                                },
+                                onPickTime: (isStart) async {
+                                  var dt = await _pickDateTime(
+                                    ctx,
+                                    isStart ? startFN : endFN,
+                                  );
+                                  if (dt != null)
+                                    setDialogState(
+                                      () => isStart ? startFN = dt : endFN = dt,
+                                    );
+                                },
+                                selectedCourse: selectedClassIdFN,
+                                onCourseChanged: (val) => setDialogState(
+                                  () => selectedClassIdFN = val,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 24),
+                            // AFTERNOON CARD
+                            Expanded(
+                              child: _buildAdvancedSessionCard(
+                                label: 'AFTERNOON BATCH',
+                                sublabel: 'PM Session',
+                                icon: Icons.nights_stay_rounded,
+                                themeColor: const Color(0xFFFD79A8),
+                                data: mcqDataAN,
+                                titleCtrl: titleCtrlAN,
+                                randomCtrl: randomCountCtrlAN,
+                                timeCtrl: timeCtrlAN,
+                                isTimed: isTimedAN,
+                                start: startAN,
+                                end: endAN,
+                                onToggleTimed: () => setDialogState(
+                                  () => isTimedAN = !isTimedAN,
+                                ),
+                                onPickFile: () async {
+                                  var res = await _pickMcqJson();
+                                  if (res != null) {
+                                    setDialogState(() {
+                                      mcqDataAN = res;
+                                      if (titleCtrlAN.text.isEmpty)
+                                        titleCtrlAN.text = 'Afternoon MCQ';
+                                    });
+                                  }
+                                },
+                                onPickTime: (isStart) async {
+                                  var dt = await _pickDateTime(
+                                    ctx,
+                                    isStart ? startAN : endAN,
+                                  );
+                                  if (dt != null)
+                                    setDialogState(
+                                      () => isStart ? startAN = dt : endAN = dt,
+                                    );
+                                },
+                                selectedCourse: selectedClassIdAN,
+                                onCourseChanged: (val) => setDialogState(
+                                  () => selectedClassIdAN = val,
+                                ),
+                              ),
+                            ),
                           ],
-                          onChanged: (val) => setDialogState(() {}),
                         ),
-                      if (isTimed) const SizedBox(height: 16),
-                      OutlinedButton.icon(
-                        onPressed: () async {
-                          var res = await FilePicker.platform.pickFiles(
-                            type: FileType.custom,
-                            allowedExtensions: ['json'],
-                            withData: true,
-                          );
-                          if (res != null && res.files.first.bytes != null) {
-                            try {
-                              final data = jsonDecode(
-                                utf8.decode(res.files.first.bytes!),
-                              );
-                              if (data is List) {
-                                setDialogState(() => mcqData = data);
-                              }
-                            } catch (e) {
-                              debugPrint('MCQ JSON Error: $e');
-                            }
-                          }
-                        },
-                        icon: const Icon(Icons.upload_file),
-                        label: Text(
-                          mcqData != null
-                              ? 'JSON Selected (${mcqData!.length} Qs)'
-                              : 'Select MCQ JSON File',
+                        const SizedBox(height: 32),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 24,
+                            vertical: 16,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(
+                              color: Colors.grey.withAlpha(30),
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(
+                                Icons.info_outline,
+                                color: Colors.blue.shade400,
+                              ),
+                              const SizedBox(width: 16),
+                              Expanded(
+                                child: Text(
+                                  'Sessions marked as "Active" will be published as separate tests. Ensure document is uploaded for each batch you want to activate.',
+                                  style: GoogleFonts.outfit(
+                                    fontSize: 13,
+                                    color: Colors.grey.shade600,
+                                  ),
+                                ),
+                              ),
+                              if (hasFN || hasAN)
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 6,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: const Color(
+                                      0xFF6C5CE7,
+                                    ).withAlpha(20),
+                                    borderRadius: BorderRadius.circular(20),
+                                  ),
+                                  child: Text(
+                                    '${(hasFN ? 1 : 0) + (hasAN ? 1 : 0)} Active Session(s)',
+                                    style: const TextStyle(
+                                      color: Color(0xFF6C5CE7),
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 12),
-                      Text(
-                        'Note: JSON file should be an array of questions with 4 options each and an answerIndex.',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Colors.grey.shade600,
-                        ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
               ),
+              actionsPadding: const EdgeInsets.fromLTRB(32, 0, 32, 32),
               actions: [
                 TextButton(
                   onPressed: () => Navigator.pop(ctx),
-                  child: const Text('Cancel'),
+                  child: Text(
+                    'Cancel Task',
+                    style: GoogleFonts.outfit(
+                      color: Colors.grey,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                 ),
+                const SizedBox(width: 8),
                 ElevatedButton(
-                  onPressed: () {
-                    if (titleCtrl.text.isNotEmpty &&
-                        selectedClassId != null &&
-                        mcqData != null) {
-                      int qCount = mcqData?.length ?? 0;
-                      int timePerQ = isTimed
-                          ? (int.tryParse(timeCtrl.text) ?? 30)
-                          : 0;
+                  onPressed: () async {
+                    if (mcqDataFN == null && mcqDataAN == null) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Please upload at least one JSON file'),
+                        ),
+                      );
+                      return;
+                    }
 
-                      int? questionsToShow = int.tryParse(randomCountCtrl.text);
-                      if (questionsToShow != null &&
-                          (questionsToShow <= 0 || questionsToShow > qCount)) {
+                    if (mcqDataFN != null && selectedClassIdFN == null) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            'Please select a course for Forenoon batch',
+                          ),
+                        ),
+                      );
+                      return;
+                    }
+                    if (mcqDataAN != null && selectedClassIdAN == null) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            'Please select a course for Afternoon batch',
+                          ),
+                        ),
+                      );
+                      return;
+                    }
+
+                    // Create missions
+                    if (mcqDataFN != null) {
+                      if (titleCtrlFN.text.isEmpty) {
                         ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              'Invalid number of questions to select. Must be between 1 and $qCount.',
-                            ),
+                          const SnackBar(
+                            content: Text('Forenoon title required'),
                           ),
                         );
                         return;
                       }
-
-                      int effectiveShowCount = questionsToShow ?? qCount;
-                      int totalSeconds = effectiveShowCount * timePerQ;
-                      if (endDateTime.difference(startDateTime).inSeconds <
-                          totalSeconds) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              'Warning: The time window between Start and End (${endDateTime.difference(startDateTime).inSeconds}s) is smaller than the required total test time (${totalSeconds}s). Please adjust.',
-                            ),
-                          ),
-                        );
-                        return;
-                      }
-                      AppData().addAssignment(
-                        selectedClassId!,
-                        titleCtrl.text,
-                        endDateTime.toString().substring(0, 16),
+                      await AppData().addAssignment(
+                        selectedClassIdFN!,
+                        '${titleCtrlFN.text} (FN)',
+                        endFN.toString().substring(0, 16),
                         year: selectedYear,
                         semester: selectedSem,
-                        mcqData: mcqData,
-                        timePerQuestion: timePerQ,
-                        questionsToShow: questionsToShow,
-                        startDateTime: startDateTime,
-                        dueDateTime: endDateTime,
+                        mcqData: mcqDataFN,
+                        timePerQuestion: isTimedFN
+                            ? (int.tryParse(timeCtrlFN.text) ?? 30)
+                            : 0,
+                        questionsToShow: int.tryParse(randomCountCtrlFN.text),
+                        startDateTime: startFN,
+                        dueDateTime: endFN,
                       );
-                      Navigator.pop(ctx);
-                      setState(() {}); // refresh global list
                     }
+
+                    if (mcqDataAN != null) {
+                      if (titleCtrlAN.text.isEmpty) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Afternoon title required'),
+                          ),
+                        );
+                        return;
+                      }
+                      await AppData().addAssignment(
+                        selectedClassIdAN!,
+                        '${titleCtrlAN.text} (AN)',
+                        endAN.toString().substring(0, 16),
+                        year: selectedYear,
+                        semester: selectedSem,
+                        mcqData: mcqDataAN,
+                        timePerQuestion: isTimedAN
+                            ? (int.tryParse(timeCtrlAN.text) ?? 30)
+                            : 0,
+                        questionsToShow: int.tryParse(randomCountCtrlAN.text),
+                        startDateTime: startAN,
+                        dueDateTime: endAN,
+                      );
+                    }
+
+                    Navigator.pop(ctx);
+                    setState(() {});
                   },
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF6C5CE7),
                     foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 40,
+                      vertical: 20,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    elevation: 8,
+                    shadowColor: const Color(0xFF6C5CE7).withAlpha(100),
                   ),
-                  child: const Text('Create Test'),
+                  child: Text(
+                    'Deploy Test Sessions',
+                    style: GoogleFonts.outfit(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                  ),
                 ),
               ],
             );
@@ -1975,6 +2260,350 @@ class _McqCentralViewState extends State<McqCentralView> {
         );
       },
     );
+  }
+
+  Widget _buildAdvancedSessionCard({
+    required String label,
+    required String sublabel,
+    required IconData icon,
+    required Color themeColor,
+    required List<dynamic>? data,
+    required TextEditingController titleCtrl,
+    required TextEditingController randomCtrl,
+    required TextEditingController timeCtrl,
+    required bool isTimed,
+    required DateTime start,
+    required DateTime end,
+    required VoidCallback onToggleTimed,
+    required VoidCallback onPickFile,
+    required Function(bool) onPickTime,
+    String? selectedCourse,
+    required Function(String?) onCourseChanged,
+  }) {
+    bool isActive = data != null;
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
+      padding: const EdgeInsets.all(32),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(
+            color: isActive
+                ? themeColor.withAlpha(20)
+                : Colors.black.withAlpha(10),
+            blurRadius: 30,
+            offset: const Offset(0, 15),
+          ),
+        ],
+        border: Border.all(
+          color: isActive
+              ? themeColor.withAlpha(80)
+              : Colors.grey.withAlpha(30),
+          width: isActive ? 2 : 1,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: isActive
+                      ? themeColor.withAlpha(30)
+                      : Colors.grey.withAlpha(20),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Icon(icon, color: isActive ? themeColor : Colors.grey),
+              ),
+              const SizedBox(width: 16),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    style: GoogleFonts.outfit(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                      color: isActive ? themeColor : Colors.grey.shade800,
+                    ),
+                  ),
+                  Text(
+                    sublabel,
+                    style: GoogleFonts.outfit(fontSize: 12, color: Colors.grey),
+                  ),
+                ],
+              ),
+              const Spacer(),
+              if (isActive)
+                const Icon(Icons.check_circle, color: Colors.green, size: 24)
+              else
+                Icon(
+                  Icons.circle_outlined,
+                  color: Colors.grey.withAlpha(50),
+                  size: 24,
+                ),
+            ],
+          ),
+          const SizedBox(height: 24),
+          Text(
+            'BATCH CONFIGURATION',
+            style: GoogleFonts.outfit(
+              fontSize: 10,
+              fontWeight: FontWeight.bold,
+              color: Colors.grey.shade400,
+              letterSpacing: 1.5,
+            ),
+          ),
+          const SizedBox(height: 16),
+          DropdownButtonFormField<String>(
+            value: selectedCourse,
+            style: GoogleFonts.outfit(fontSize: 14, color: Colors.black),
+            decoration: InputDecoration(
+              labelText: 'Target Course',
+              prefixIcon: const Icon(Icons.class_outlined),
+              filled: true,
+              fillColor: const Color(0xFFF8F9FE),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide.none,
+              ),
+            ),
+            isExpanded: true,
+            hint: const Text('Select handled course'),
+            items: AppData().filteredClasses.map((cls) {
+              return DropdownMenuItem<String>(
+                value: cls['id'],
+                child: Text(cls['title'], overflow: TextOverflow.ellipsis),
+              );
+            }).toList(),
+            onChanged: onCourseChanged,
+            validator: (v) => v == null ? 'Required' : null,
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: titleCtrl,
+            style: GoogleFonts.outfit(fontSize: 14),
+            decoration: InputDecoration(
+              labelText: 'Display Title',
+              hintText: 'Enter session name',
+              prefixIcon: const Icon(Icons.edit_note_rounded),
+              filled: true,
+              fillColor: const Color(0xFFF8F9FE),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide.none,
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: randomCtrl,
+                  style: GoogleFonts.outfit(fontSize: 14),
+                  decoration: InputDecoration(
+                    labelText: 'Question Pull',
+                    hintText: 'All',
+                    prefixIcon: const Icon(Icons.shuffle_rounded),
+                    filled: true,
+                    fillColor: const Color(0xFFF8F9FE),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: TextField(
+                  controller: timeCtrl,
+                  enabled: isTimed,
+                  style: GoogleFonts.outfit(fontSize: 14),
+                  decoration: InputDecoration(
+                    labelText: 'Sec/Q',
+                    prefixIcon: const Icon(Icons.timer_rounded),
+                    filled: true,
+                    fillColor: isTimed
+                        ? const Color(0xFFF8F9FE)
+                        : Colors.grey.shade100,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          SwitchListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            title: Text(
+              'Limited Duration Mode',
+              style: GoogleFonts.outfit(
+                fontSize: 12,
+                color: Colors.grey.shade700,
+              ),
+            ),
+            value: isTimed,
+            onChanged: (v) => onToggleTimed(),
+            activeColor: themeColor,
+          ),
+          const SizedBox(height: 24),
+          Text(
+            'TIME WINDOW',
+            style: GoogleFonts.outfit(
+              fontSize: 10,
+              fontWeight: FontWeight.bold,
+              color: Colors.grey.shade400,
+              letterSpacing: 1.5,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: _buildModernTimeBox(
+                  'Starts At',
+                  _formatDateTime12h(start),
+                  () => onPickTime(true),
+                  isActive ? themeColor : Colors.grey,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _buildModernTimeBox(
+                  'Ends At',
+                  _formatDateTime12h(end),
+                  () => onPickTime(false),
+                  isActive ? themeColor : Colors.grey,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 24),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: onPickFile,
+              icon: Icon(
+                isActive
+                    ? Icons.file_present_rounded
+                    : Icons.upload_file_rounded,
+              ),
+              label: Text(isActive ? 'Document Ready' : 'Choose MCQ Data'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: isActive ? themeColor : Colors.grey.shade100,
+                foregroundColor: isActive ? Colors.white : Colors.grey.shade700,
+                padding: const EdgeInsets.symmetric(vertical: 20),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                elevation: 0,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildModernTimeBox(
+    String label,
+    String value,
+    VoidCallback onTap,
+    Color themeColor,
+  ) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF8F9FE),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.grey.withAlpha(20)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              label,
+              style: GoogleFonts.outfit(
+                fontSize: 9,
+                fontWeight: FontWeight.bold,
+                color: Colors.grey,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              value,
+              style: GoogleFonts.outfit(
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+                color: Colors.black87,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<DateTime?> _pickDateTime(
+    BuildContext context,
+    DateTime initial,
+  ) async {
+    DateTime? date = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: DateTime.now().subtract(const Duration(days: 1)),
+      lastDate: DateTime(2030),
+    );
+    if (date != null) {
+      TimeOfDay? time = await showTimePicker(
+        context: context,
+        initialTime: TimeOfDay.fromDateTime(initial),
+      );
+      if (time != null) {
+        return DateTime(
+          date.year,
+          date.month,
+          date.day,
+          time.hour,
+          time.minute,
+        );
+      }
+    }
+    return null;
+  }
+
+  Future<List<dynamic>?> _pickMcqJson() async {
+    var res = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['json'],
+      withData: true,
+    );
+    if (res != null && res.files.first.bytes != null) {
+      try {
+        final data = jsonDecode(utf8.decode(res.files.first.bytes!));
+        if (data is List) return data;
+      } catch (e) {
+        debugPrint('MCQ JSON Error: $e');
+      }
+    }
+    return null;
   }
 }
 
@@ -1988,110 +2617,108 @@ class ProfileView extends StatelessWidget {
   Widget build(BuildContext context) {
     final role = AppData().currentUserRole;
     final isTeacher = role == UserRole.teacher;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isMobile = screenWidth < 900;
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(40),
+      padding: EdgeInsets.all(isMobile ? 16 : 40),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildProfileHeader(context, isTeacher),
+          _buildProfileHeader(context, isTeacher, isMobile),
           const SizedBox(height: 32),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                flex: 2,
-                child: Column(
+          isMobile
+              ? Column(
                   children: [
-                    _buildInfoCard(
-                      'Personal Information',
-                      Icons.person_outline,
-                      [
-                        _buildInfoRow(
-                          'Full Name',
-                          AppData().loggedName ?? 'N/A',
-                        ),
-                        if (isTeacher && AppData().loggedEmail != null && AppData().loggedEmail!.isNotEmpty)
-                          _buildInfoRow(
-                            'Email Address',
-                            AppData().loggedEmail!,
-                          ),
-                        _buildInfoRow(
-                          'Phone Number',
-                          AppData().loggedPhone ?? 'N/A',
-                        ),
-                        if (!isTeacher)
-                          _buildInfoRow(
-                            'Registration No',
-                            AppData().loggedEnrollNo ?? 'N/A',
-                          ),
-                        if (isTeacher)
-                          _buildInfoRow(
-                            'Teacher ID',
-                            AppData().loggedTeacherId ?? 'N/A',
-                          ),
-                      ],
-                    ),
+                    _buildPersonalAndAcademicInfo(isTeacher),
                     const SizedBox(height: 24),
-                    _buildInfoCard(
-                      isTeacher ? 'Professional Details' : 'Academic Details',
-                      isTeacher ? Icons.work_outline : Icons.school_outlined,
-                      isTeacher
-                          ? [
-                              _buildInfoRow(
-                                'Department',
-                                AppData().loggedDepartment ?? 'N/A',
-                              ),
-                              _buildInfoRow(
-                                'Designation',
-                                AppData().loggedDesignation ?? 'N/A',
-                              ),
-                              _buildInfoRow(
-                                'Academic Year',
-                                AppData().loggedYear ?? 'N/A',
-                              ),
-                              _buildInfoRow(
-                                'Current Semester',
-                                AppData().loggedSemester ?? 'N/A',
-                              ),
-                              
-                            ]
-                          : [
-                              _buildInfoRow(
-                                'Department',
-                                AppData().loggedDepartment ?? 'N/A',
-                              ),
-                              _buildInfoRow(
-                                'Year / Semester',
-                                '${AppData().loggedYear ?? 'N/A'} / ${AppData().loggedSemester ?? 'N/A'}',
-                              ),
-
-                            ],
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 32),
-              Expanded(
-                flex: 1,
-                child: Column(
-                  children: [
                     _buildAccountStatusCard(),
                     const SizedBox(height: 24),
                     _buildQuickActionsCard(context),
                   ],
+                )
+              : Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      flex: 2,
+                      child: _buildPersonalAndAcademicInfo(isTeacher),
+                    ),
+                    const SizedBox(width: 32),
+                    Expanded(
+                      flex: 1,
+                      child: Column(
+                        children: [
+                          _buildAccountStatusCard(),
+                          const SizedBox(height: 24),
+                          _buildQuickActionsCard(context),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
-              ),
-            ],
-          ),
         ],
       ),
     );
   }
 
-  Widget _buildProfileHeader(BuildContext context, bool isTeacher) {
+  Widget _buildPersonalAndAcademicInfo(bool isTeacher) {
+    return Column(
+      children: [
+        _buildInfoCard('Personal Information', Icons.person_outline, [
+          _buildInfoRow('Full Name', AppData().loggedName ?? 'N/A'),
+          if (isTeacher &&
+              AppData().loggedEmail != null &&
+              AppData().loggedEmail!.isNotEmpty)
+            _buildInfoRow('Email Address', AppData().loggedEmail!),
+          _buildInfoRow('Phone Number', AppData().loggedPhone ?? 'N/A'),
+          if (!isTeacher)
+            _buildInfoRow('Registration No', AppData().loggedEnrollNo ?? 'N/A'),
+          if (isTeacher)
+            _buildInfoRow('Teacher ID', AppData().loggedTeacherId ?? 'N/A'),
+        ]),
+        const SizedBox(height: 24),
+        _buildInfoCard(
+          isTeacher ? 'Professional Details' : 'Academic Details',
+          isTeacher ? Icons.work_outline : Icons.school_outlined,
+          isTeacher
+              ? [
+                  _buildInfoRow(
+                    'Department',
+                    AppData().loggedDepartment ?? 'N/A',
+                  ),
+                  _buildInfoRow(
+                    'Designation',
+                    AppData().loggedDesignation ?? 'N/A',
+                  ),
+                  _buildInfoRow('Academic Year', AppData().loggedYear ?? 'N/A'),
+                  _buildInfoRow(
+                    'Current Semester',
+                    AppData().loggedSemester ?? 'N/A',
+                  ),
+                ]
+              : [
+                  _buildInfoRow(
+                    'Department',
+                    AppData().loggedDepartment ?? 'N/A',
+                  ),
+                  _buildInfoRow(
+                    'Year / Semester',
+                    '${AppData().loggedYear ?? 'N/A'} / ${AppData().loggedSemester ?? 'N/A'}',
+                  ),
+                ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildProfileHeader(
+    BuildContext context,
+    bool isTeacher,
+    bool isMobile,
+  ) {
     return Container(
-      padding: const EdgeInsets.all(32),
+      padding: EdgeInsets.all(isMobile ? 12 : 32),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           colors: [
@@ -2110,105 +2737,135 @@ class ProfileView extends StatelessWidget {
           ),
         ],
       ),
-      child: Row(
-        children: [
-          Stack(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(4),
-                decoration: const BoxDecoration(
-                  color: Colors.white,
-                  shape: BoxShape.circle,
-                ),
-                child: CircleAvatar(
-                  radius: 60,
-                  backgroundColor: Colors.white,
-                  child: Hero(
-                    tag: 'profile_avatar',
-                    child: Icon(
-                      isTeacher ? Icons.person_4 : Icons.face,
-                      size: 70,
-                      color: const Color(0xFF6C5CE7),
-                    ),
-                  ),
-                ),
-              ),
-              Positioned(
-                bottom: 5,
-                right: 5,
-                child: Container(
-                  padding: const EdgeInsets.all(6),
-                  decoration: const BoxDecoration(
-                    color: Colors.green,
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(Icons.check, color: Colors.white, size: 16),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(width: 32),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+      child: isMobile
+          ? Column(
               children: [
-                Text(
-                  AppData().loggedName ?? 'Guest User',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 32,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 6,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withAlpha(50),
-                        borderRadius: BorderRadius.circular(30),
-                      ),
-                      child: Text(
-                        isTeacher ? 'Senior Faculty' : 'Undergraduate Student',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Text(
-                      'ID: ${isTeacher ? AppData().loggedTeacherId : AppData().loggedEnrollNo}',
-                      style: TextStyle(
-                        color: Colors.white.withAlpha(200),
-                        fontSize: 14,
-                        letterSpacing: 0.5,
-                      ),
-                    ),
-                  ],
-                ),
+                _buildAvatar(isTeacher, isMobile),
+                const SizedBox(height: 16),
+                _buildProfileDetails(isTeacher, isMobile),
+                const SizedBox(height: 16),
+                _buildEditProfileButton(context, isTeacher, isMobile),
+              ],
+            )
+          : Row(
+              children: [
+                _buildAvatar(isTeacher, isMobile),
+                const SizedBox(width: 32),
+                Expanded(child: _buildProfileDetails(isTeacher, isMobile)),
+                _buildEditProfileButton(context, isTeacher, isMobile),
               ],
             ),
+    );
+  }
+
+  Widget _buildAvatar(bool isTeacher, bool isMobile) {
+    return Stack(
+      children: [
+        Container(
+          padding: const EdgeInsets.all(4),
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            shape: BoxShape.circle,
           ),
-          ElevatedButton.icon(
-            onPressed: () => _showEditProfileDialog(context, isTeacher),
-            icon: const Icon(Icons.edit_outlined, size: 18),
-            label: const Text('Edit Profile'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.white,
-              foregroundColor: const Color(0xFF6C5CE7),
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 18),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
+          child: CircleAvatar(
+            radius: isMobile ? 40 : 60,
+            backgroundColor: Colors.white,
+            child: Hero(
+              tag: 'profile_avatar',
+              child: Icon(
+                isTeacher ? Icons.person_4 : Icons.face,
+                size: isMobile ? 45 : 70,
+                color: const Color(0xFF6C5CE7),
               ),
             ),
           ),
-        ],
+        ),
+        Positioned(
+          bottom: 2,
+          right: 2,
+          child: Container(
+            padding: const EdgeInsets.all(4),
+            decoration: const BoxDecoration(
+              color: Colors.green,
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(Icons.check, color: Colors.white, size: 12),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildProfileDetails(bool isTeacher, bool isMobile) {
+    return Column(
+      crossAxisAlignment: isMobile
+          ? CrossAxisAlignment.center
+          : CrossAxisAlignment.start,
+      children: [
+        Text(
+          AppData().loggedName ?? 'Guest User',
+          textAlign: isMobile ? TextAlign.center : TextAlign.start,
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: isMobile ? 22 : 32,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          alignment: isMobile ? WrapAlignment.center : WrapAlignment.start,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 12,
+          runSpacing: 8,
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.white.withAlpha(50),
+                borderRadius: BorderRadius.circular(30),
+              ),
+              child: Text(
+                isTeacher ? 'Senior Faculty' : 'Undergraduate Student',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            Text(
+              'ID: ${isTeacher ? AppData().loggedTeacherId : AppData().loggedEnrollNo}',
+              style: TextStyle(
+                color: Colors.white.withAlpha(200),
+                fontSize: 12,
+                letterSpacing: 0.5,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildEditProfileButton(
+    BuildContext context,
+    bool isTeacher,
+    bool isMobile,
+  ) {
+    return SizedBox(
+      width: isMobile ? double.infinity : null,
+      child: ElevatedButton.icon(
+        onPressed: () => _showEditProfileDialog(context, isTeacher),
+        icon: const Icon(Icons.edit_outlined, size: 18),
+        label: const Text('Edit Profile'),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.white,
+          foregroundColor: const Color(0xFF6C5CE7),
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
       ),
     );
   }
@@ -2614,357 +3271,394 @@ class DashboardView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     bool isTeacher = AppData().currentUserRole == UserRole.teacher;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isMobile = screenWidth < 900;
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(40),
+      padding: EdgeInsets.all(isMobile ? 16 : 40),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Stat Cards Row
+          // Stat Cards - Responsive Grid/Wrap
+          isMobile
+              ? Column(
+                  children: [
+                    Row(
+                      children: [
+                        _buildStatCard(
+                          isTeacher ? 'Active Courses' : 'Enrolled Courses',
+                          AppData().filteredClasses.length.toString(),
+                          Icons.library_books,
+                          Colors.blue,
+                        ),
+                        const SizedBox(width: 12),
+                        _buildStatCard(
+                          isTeacher
+                              ? 'Assignments Created'
+                              : 'Pending Assignments',
+                          AppData().filteredClasses
+                              .expand(
+                                (cls) => AppData().filteredAssignments(
+                                  cls['id'] ?? '',
+                                ),
+                              )
+                              .where((a) => !a['isDone'])
+                              .length
+                              .toString(),
+                          Icons.assignment,
+                          Colors.orange,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        _buildStatCard(
+                          isTeacher ? 'Submissions' : 'Completed Work',
+                          AppData().filteredClasses
+                              .expand(
+                                (cls) => AppData().filteredAssignments(
+                                  cls['id'] ?? '',
+                                ),
+                              )
+                              .where((a) => a['isDone'])
+                              .length
+                              .toString(),
+                          Icons.check_circle,
+                          Colors.green,
+                        ),
+                        const SizedBox(width: 12),
+                        _buildStatCard(
+                          'Upcoming Class',
+                          'Tomorrow',
+                          Icons.calendar_month,
+                          const Color(0xFF6C5CE7),
+                        ),
+                      ],
+                    ),
+                  ],
+                )
+              : Row(
+                  children: [
+                    _buildStatCard(
+                      isTeacher ? 'Active Courses' : 'Enrolled Courses',
+                      AppData().filteredClasses.length.toString(),
+                      Icons.library_books,
+                      Colors.blue,
+                    ),
+                    const SizedBox(width: 24),
+                    _buildStatCard(
+                      isTeacher ? 'Assignments Created' : 'Pending Assignments',
+                      AppData().filteredClasses
+                          .expand(
+                            (cls) =>
+                                AppData().filteredAssignments(cls['id'] ?? ''),
+                          )
+                          .where((a) => !a['isDone'])
+                          .length
+                          .toString(),
+                      Icons.assignment,
+                      Colors.orange,
+                    ),
+                    const SizedBox(width: 24),
+                    _buildStatCard(
+                      isTeacher ? 'Submissions' : 'Completed Work',
+                      AppData().filteredClasses
+                          .expand(
+                            (cls) =>
+                                AppData().filteredAssignments(cls['id'] ?? ''),
+                          )
+                          .where((a) => a['isDone'])
+                          .length
+                          .toString(),
+                      Icons.check_circle,
+                      Colors.green,
+                    ),
+                    const SizedBox(width: 24),
+                    _buildStatCard(
+                      'Upcoming Class',
+                      'Tomorrow',
+                      Icons.calendar_month,
+                      const Color(0xFF6C5CE7),
+                    ),
+                  ],
+                ),
+          const SizedBox(height: 32),
+
+          // Main Content Layout
+          if (isMobile)
+            Column(
+              children: [
+                _buildActivityAnalytics(),
+                const SizedBox(height: 24),
+                _buildLiveClassesPanel(),
+                const SizedBox(height: 24),
+                _buildRecentCoursesTable(isMobile),
+                const SizedBox(height: 24),
+                _buildAssignmentBreakdown(),
+              ],
+            )
+          else
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  flex: 7,
+                  child: Column(
+                    children: [
+                      _buildActivityAnalytics(),
+                      const SizedBox(height: 32),
+                      _buildRecentCoursesTable(isMobile),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 32),
+                Expanded(
+                  flex: 3,
+                  child: Column(
+                    children: [
+                      _buildLiveClassesPanel(),
+                      const SizedBox(height: 32),
+                      _buildAssignmentBreakdown(),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActivityAnalytics() {
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
           Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              _buildStatCard(
-                isTeacher ? 'Active Courses' : 'Enrolled Courses',
-                AppData().filteredClasses.length.toString(),
-                Icons.library_books,
-                Colors.blue,
+              const Text(
+                'Activity Analytics',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
               ),
-              const SizedBox(width: 24),
-              _buildStatCard(
-                isTeacher ? 'Assignments Created' : 'Pending Assignments',
-                AppData().filteredClasses
-                    .expand(
-                      (cls) => AppData().filteredAssignments(cls['id'] ?? ''),
-                    )
-                    .where((a) => !a['isDone'])
-                    .length
-                    .toString(),
-                Icons.assignment,
-                Colors.orange,
-              ),
-              const SizedBox(width: 24),
-              _buildStatCard(
-                isTeacher ? 'Submissions to Review' : 'Completed Work',
-                AppData().filteredClasses
-                    .expand(
-                      (cls) => AppData().filteredAssignments(cls['id'] ?? ''),
-                    )
-                    .where((a) => a['isDone'])
-                    .length
-                    .toString(),
-                Icons.check_circle,
-                Colors.green,
-              ),
-              const SizedBox(width: 24),
-              _buildStatCard(
-                'Upcoming Class',
-                'Tomorrow',
-                Icons.calendar_month,
-                const Color(0xFF6C5CE7),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade100,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: const Text(
+                  'Weekly',
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                ),
               ),
             ],
           ),
           const SizedBox(height: 32),
+          SizedBox(
+            height: 220,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                _buildCustomBar('Mon', 0.4, false),
+                _buildCustomBar('Tue', 0.8, false),
+                _buildCustomBar('Wed', 0.5, false),
+                _buildCustomBar('Thu', 0.9, true),
+                _buildCustomBar('Fri', 0.6, false),
+                _buildCustomBar('Sat', 0.3, false),
+                _buildCustomBar('Sun', 0.7, false),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
+  Widget _buildRecentCoursesTable(bool isMobile) {
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Recent Courses',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 24),
+          ...AppData().filteredClasses.map(
+            (c) => Padding(
+              padding: const EdgeInsets.only(bottom: 16),
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    backgroundColor: c['color'].withAlpha(20),
+                    child: Icon(Icons.menu_book, color: c['color'], size: 18),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    flex: 2,
+                    child: Text(
+                      c['title'],
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  if (!isMobile)
+                    Expanded(
+                      child: Text(
+                        c['subtitle'],
+                        style: TextStyle(
+                          color: Colors.grey.shade600,
+                          fontSize: 13,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: c['color'].withAlpha(20),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      'Active',
+                      style: TextStyle(
+                        color: c['color'],
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  if (!isMobile)
+                    IconButton(
+                      icon: const Icon(Icons.more_horiz, color: Colors.grey),
+                      onPressed: () {},
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLiveClassesPanel() {
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
           Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              // Left large column (Chart + List)
-              Expanded(
-                flex: 7,
-                child: Column(
-                  children: [
-                    // Analytics Chart Card
-                    Container(
-                      padding: const EdgeInsets.all(24),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: Colors.grey.shade200),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              const Text(
-                                'Activity Analytics',
-                                style: TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 12,
-                                  vertical: 6,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: Colors.grey.shade100,
-                                  borderRadius: BorderRadius.circular(20),
-                                ),
-                                child: const Text(
-                                  'Weekly',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 32),
-                          SizedBox(
-                            height: 220,
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                _buildCustomBar('Mon', 0.4, false),
-                                _buildCustomBar('Tue', 0.8, false),
-                                _buildCustomBar('Wed', 0.5, false),
-                                _buildCustomBar('Thu', 0.9, true),
-                                _buildCustomBar('Fri', 0.6, false),
-                                _buildCustomBar('Sat', 0.3, false),
-                                _buildCustomBar('Sun', 0.7, false),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 32),
+              const Text(
+                'Live Classes',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              Text(
+                '• Active Now',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.green.shade600,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 24),
+          _buildLiveClassItem('PH', 'Bank', 'Motion', Colors.teal),
+          const Divider(height: 32),
+          _buildLiveClassItem('LT', 'Literature', 'Sonnets', Colors.indigo),
+          const SizedBox(height: 16),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton(
+              onPressed: () {},
+              style: OutlinedButton.styleFrom(
+                side: BorderSide(color: Colors.grey.shade300),
+              ),
+              child: const Text(
+                'View Schedule',
+                style: TextStyle(color: Colors.black87),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
-                    // Recent Classes Table
-                    Container(
-                      padding: const EdgeInsets.all(24),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: Colors.grey.shade200),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'Recent Courses',
-                            style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          const SizedBox(height: 24),
-                          ...AppData().filteredClasses.map(
-                            (c) => Padding(
-                              padding: const EdgeInsets.only(bottom: 16),
-                              child: Row(
-                                children: [
-                                  CircleAvatar(
-                                    backgroundColor: c['color'].withAlpha(20),
-                                    child: Icon(
-                                      Icons.menu_book,
-                                      color: c['color'],
-                                      size: 18,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 16),
-                                  Expanded(
-                                    flex: 2,
-                                    child: Text(
-                                      c['title'],
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  ),
-                                  Expanded(
-                                    child: Text(
-                                      c['subtitle'],
-                                      style: TextStyle(
-                                        color: Colors.grey.shade600,
-                                        fontSize: 13,
-                                      ),
-                                    ),
-                                  ),
-                                  Expanded(
-                                    child: Align(
-                                      alignment: Alignment.centerRight,
-                                      child: Container(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 12,
-                                          vertical: 4,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: c['color'].withAlpha(20),
-                                          borderRadius: BorderRadius.circular(
-                                            20,
-                                          ),
-                                        ),
-                                        child: Text(
-                                          'Active',
-                                          style: TextStyle(
-                                            color: c['color'],
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(
-                                      Icons.more_horiz,
-                                      color: Colors.grey,
-                                    ),
-                                    onPressed: () {},
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
+  Widget _buildAssignmentBreakdown() {
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Assignment Breakdown',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 24),
+          Container(
+            height: 16,
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(borderRadius: BorderRadius.circular(8)),
+            child: Row(
+              children: [
+                Expanded(
+                  flex: 5,
+                  child: Container(color: Colors.green.shade400),
                 ),
-              ),
-              const SizedBox(width: 32),
-              // Right side panels
-              Expanded(
-                flex: 3,
-                child: Column(
-                  children: [
-                    // Online Classes Panel
-                    Container(
-                      padding: const EdgeInsets.all(24),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: Colors.grey.shade200),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              const Text(
-                                'Live Classes',
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              Text(
-                                '• Active Now',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.green.shade600,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 24),
-                          _buildLiveClassItem(
-                            'PH',
-                            'Bank',
-                            'Motion',
-                            Colors.teal,
-                          ),
-                          const Divider(height: 32),
-                          _buildLiveClassItem(
-                            'LT',
-                            'Literature',
-                            'Sonnets',
-                            Colors.indigo,
-                          ),
-                          const SizedBox(height: 16),
-                          SizedBox(
-                            width: double.infinity,
-                            child: OutlinedButton(
-                              onPressed: () {},
-                              style: OutlinedButton.styleFrom(
-                                side: BorderSide(color: Colors.grey.shade300),
-                              ),
-                              child: const Text(
-                                'View Schedule',
-                                style: TextStyle(color: Colors.black87),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 32),
-                    // Assignment Breakdown Chart mock
-                    Container(
-                      padding: const EdgeInsets.all(24),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: Colors.grey.shade200),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'Assignment Breakdown',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          const SizedBox(height: 24),
-                          Container(
-                            height: 16,
-                            clipBehavior: Clip.antiAlias,
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Row(
-                              children: [
-                                Expanded(
-                                  flex: 5,
-                                  child: Container(
-                                    color: Colors.green.shade400,
-                                  ),
-                                ),
-                                Expanded(
-                                  flex: 3,
-                                  child: Container(
-                                    color: const Color(0xFF6C5CE7),
-                                  ),
-                                ),
-                                Expanded(
-                                  flex: 2,
-                                  child: Container(color: Colors.grey.shade300),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 16),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              _buildLegendDot(
-                                Colors.green.shade400,
-                                'Submitted',
-                              ),
-                              _buildLegendDot(
-                                const Color(0xFF6C5CE7),
-                                'Grading',
-                              ),
-                              _buildLegendDot(Colors.grey.shade300, 'Pending'),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
+                Expanded(
+                  flex: 3,
+                  child: Container(color: const Color(0xFF6C5CE7)),
                 ),
-              ),
+                Expanded(
+                  flex: 2,
+                  child: Container(color: Colors.grey.shade300),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          Wrap(
+            spacing: 16,
+            runSpacing: 8,
+            children: [
+              _buildLegendDot(Colors.green.shade400, 'Submitted'),
+              _buildLegendDot(const Color(0xFF6C5CE7), 'Grading'),
+              _buildLegendDot(Colors.grey.shade300, 'Pending'),
             ],
           ),
         ],
@@ -3125,18 +3819,6 @@ class DashboardView extends StatelessWidget {
                     horizontal: 8,
                     vertical: 4,
                   ),
-                  decoration: BoxDecoration(
-                    color: Colors.green.withAlpha(20),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Text(
-                    '+12%',
-                    style: TextStyle(
-                      color: Colors.green,
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
                 ),
               ],
             ),
@@ -3169,32 +3851,66 @@ class CoursesView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isMobile = screenWidth < 800;
+
+    // Choose column count based on width
+    int crossAxisCount = 3;
+    if (screenWidth < 600) {
+      crossAxisCount = 1;
+    } else if (screenWidth < 1100) {
+      crossAxisCount = 2;
+    }
+
     return Padding(
-      padding: const EdgeInsets.all(40.0),
+      padding: EdgeInsets.all(isMobile ? 16.0 : 40.0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'All Courses',
-            style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'All Courses',
+                style: TextStyle(
+                  fontSize: isMobile ? 20 : 24,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              if (AppData().currentUserRole == UserRole.teacher)
+                ElevatedButton.icon(
+                  onPressed: () => _showAddCourseDialog(context),
+                  icon: const Icon(Icons.add),
+                  label: const Text('Add Course'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF6C5CE7),
+                    foregroundColor: Colors.white,
+                    padding: EdgeInsets.symmetric(
+                      horizontal: isMobile ? 12 : 20,
+                      vertical: isMobile ? 10 : 12,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    elevation: 0,
+                  ),
+                ),
+            ],
           ),
-          const SizedBox(height: 32),
+          SizedBox(height: isMobile ? 16 : 32),
           Expanded(
             child: GridView.builder(
               itemCount: AppData().filteredClasses.length,
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 3,
-                crossAxisSpacing: 32,
-                mainAxisSpacing: 32,
-                childAspectRatio: 1.3,
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: crossAxisCount,
+                crossAxisSpacing: isMobile ? 16 : 32,
+                mainAxisSpacing: isMobile ? 16 : 32,
+                childAspectRatio: isMobile ? 1.8 : 1.3,
               ),
               itemBuilder: (context, index) {
                 final cls = AppData().filteredClasses[index];
                 return GestureDetector(
                   onTap: () {
-                    // We can navigate internally or push a route.
-                    // Pushing a route over the Expanded area requires a nested navigator.
-                    // For simplicity, we push a full screen route.
                     Navigator.push(
                       context,
                       MaterialPageRoute(
@@ -3223,7 +3939,7 @@ class CoursesView extends StatelessWidget {
                           flex: 3,
                           child: Container(
                             color: cls['color'],
-                            padding: const EdgeInsets.all(24),
+                            padding: EdgeInsets.all(isMobile ? 16 : 24),
                             child: Row(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
@@ -3231,12 +3947,13 @@ class CoursesView extends StatelessWidget {
                                   child: Column(
                                     crossAxisAlignment:
                                         CrossAxisAlignment.start,
+                                    mainAxisAlignment: MainAxisAlignment.center,
                                     children: [
                                       Text(
                                         cls['title'],
-                                        style: const TextStyle(
+                                        style: TextStyle(
                                           color: Colors.white,
-                                          fontSize: 20,
+                                          fontSize: isMobile ? 16 : 20,
                                           fontWeight: FontWeight.bold,
                                         ),
                                       ),
@@ -3244,17 +3961,34 @@ class CoursesView extends StatelessWidget {
                                         cls['subtitle'],
                                         style: TextStyle(
                                           color: Colors.white.withAlpha(200),
-                                          fontSize: 14,
+                                          fontSize: isMobile ? 12 : 14,
                                         ),
                                       ),
                                     ],
                                   ),
                                 ),
-                                Icon(
-                                  Icons.menu_book,
-                                  color: Colors.white.withAlpha(150),
-                                  size: 32,
-                                ),
+                                AppData().currentUserRole == UserRole.teacher &&
+                                        AppData().teacherCustomCourses.contains(
+                                          cls['title'],
+                                        )
+                                    ? IconButton(
+                                        icon: const Icon(
+                                          Icons.delete_outline,
+                                          color: Colors.white,
+                                        ),
+                                        tooltip: 'Delete Course',
+                                        onPressed: () {
+                                          _showDeleteConfirmation(
+                                            context,
+                                            cls['title'],
+                                          );
+                                        },
+                                      )
+                                    : Icon(
+                                        Icons.menu_book,
+                                        color: Colors.white.withAlpha(150),
+                                        size: isMobile ? 24 : 32,
+                                      ),
                               ],
                             ),
                           ),
@@ -3266,10 +4000,10 @@ class CoursesView extends StatelessWidget {
                             child: Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
-                                const Text(
+                                Text(
                                   'Explore Syllabus',
                                   style: TextStyle(
-                                    fontSize: 13,
+                                    fontSize: isMobile ? 11 : 13,
                                     fontWeight: FontWeight.w600,
                                     color: Colors.black87,
                                   ),
@@ -3291,6 +4025,138 @@ class CoursesView extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  void _showDeleteConfirmation(BuildContext context, String courseName) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete Course?'),
+        content: Text(
+          'Are you sure you want to remove "$courseName"? This will remove it from your dashboard.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              AppData().removeTeacherCourse(courseName);
+              Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('"$courseName" removed successfully.'),
+                  backgroundColor: Colors.orange,
+                  behavior: SnackBarBehavior.floating,
+                  margin: const EdgeInsets.all(20),
+                ),
+              );
+            },
+            child: const Text('Delete', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showAddCourseDialog(BuildContext context) {
+    String? selectedCourse;
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
+          title: Text(
+            'Add New Course',
+            style: GoogleFonts.outfit(fontWeight: FontWeight.bold),
+          ),
+          content: Container(
+            width: double.maxFinite,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Select a course from the following list to add it to your profile.',
+                  style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
+                ),
+                const SizedBox(height: 24),
+                DropdownButtonFormField<String>(
+                  value: selectedCourse,
+                  isExpanded: true,
+                  decoration: InputDecoration(
+                    labelText: 'Choose Course',
+                    prefixIcon: const Icon(Icons.library_books_outlined),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(16),
+                      borderSide: const BorderSide(
+                        color: Color(0xFF6C5CE7),
+                        width: 2,
+                      ),
+                    ),
+                  ),
+                  items: AppData().predefinedCourses.map((String value) {
+                    return DropdownMenuItem<String>(
+                      value: value,
+                      child: Text(value, overflow: TextOverflow.ellipsis),
+                    );
+                  }).toList(),
+                  onChanged: (newValue) {
+                    setDialogState(() {
+                      selectedCourse = newValue;
+                    });
+                  },
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: Text(
+                'Cancel',
+                style: TextStyle(color: Colors.grey.shade600),
+              ),
+            ),
+            ElevatedButton(
+              onPressed: selectedCourse == null
+                  ? null
+                  : () {
+                      AppData().addTeacherCourse(selectedCourse!);
+                      Navigator.pop(ctx);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            'Course "$selectedCourse" added successfully!',
+                          ),
+                          backgroundColor: Colors.green,
+                          behavior: SnackBarBehavior.floating,
+                          margin: const EdgeInsets.all(20),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                      );
+                    },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF6C5CE7),
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              child: const Text('Add Course'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -3327,55 +4193,66 @@ class _LiveClassViewState extends State<LiveClassView> {
     super.initState();
   }
 
-
-
   @override
   void dispose() {
     super.dispose();
   }
 
   Widget _buildPreCall() {
-    return Container(
-      color: Colors.white,
-      child: Row(
-        children: [
-          Expanded(
-            flex: 6,
-            child: Padding(
-              padding: const EdgeInsets.all(40.0),
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isMobile = screenWidth < 800;
+
+    return SingleChildScrollView(
+      child: Container(
+        color: Colors.white,
+        padding: EdgeInsets.all(isMobile ? 24 : 40),
+        child: Flex(
+          direction: isMobile ? Axis.vertical : Axis.horizontal,
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            // Camera Preview Section
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: isMobile ? double.infinity : 600,
+              ),
               child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Container(
-                    width: 600,
-                    height: 350,
-                    decoration: BoxDecoration(
-                      color: Colors.black,
-                      borderRadius: BorderRadius.circular(16),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withAlpha(30),
-                          blurRadius: 30,
-                          offset: const Offset(0, 10),
-                        ),
-                      ],
-                    ),
-                    clipBehavior: Clip.antiAlias,
-                    child: const Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.videocam_off, color: Colors.white54, size: 64),
-                          SizedBox(height: 16),
-                          Text(
-                            "Camera module removed",
-                            style: TextStyle(color: Colors.white70),
+                  AspectRatio(
+                    aspectRatio: 16 / 9,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: Colors.black,
+                        borderRadius: BorderRadius.circular(16),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withAlpha(30),
+                            blurRadius: 30,
+                            offset: const Offset(0, 10),
                           ),
                         ],
                       ),
+                      clipBehavior: Clip.antiAlias,
+                      child: const Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.videocam_off,
+                              color: Colors.white54,
+                              size: 64,
+                            ),
+                            SizedBox(height: 16),
+                            Text(
+                              "Camera module removed",
+                              style: TextStyle(color: Colors.white70),
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
-                  const SizedBox(height: 32),
+                  const SizedBox(height: 24),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
@@ -3397,30 +4274,41 @@ class _LiveClassViewState extends State<LiveClassView> {
                 ],
               ),
             ),
-          ),
-          Expanded(
-            flex: 4,
-            child: Container(
-              padding: const EdgeInsets.all(40),
+            if (!isMobile) const SizedBox(width: 80),
+            if (isMobile) const SizedBox(height: 48),
+            // Join Controls Section
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: isMobile ? double.infinity : 400,
+              ),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment: isMobile
+                    ? CrossAxisAlignment.center
+                    : CrossAxisAlignment.start,
                 children: [
-                  const Text(
+                  Text(
                     'Ready to join?',
+                    textAlign: isMobile ? TextAlign.center : TextAlign.start,
                     style: TextStyle(
                       color: Colors.black87,
-                      fontSize: 36,
+                      fontSize: isMobile ? 32 : 36,
                       fontWeight: FontWeight.bold,
                     ),
                   ),
                   const SizedBox(height: 12),
-                  const Text(
+                  Text(
                     'No one else is here yet',
-                    style: TextStyle(color: Colors.grey, fontSize: 16),
+                    textAlign: isMobile ? TextAlign.center : TextAlign.start,
+                    style: const TextStyle(color: Colors.grey, fontSize: 16),
                   ),
                   const SizedBox(height: 48),
-                  Row(
+                  Wrap(
+                    alignment: isMobile
+                        ? WrapAlignment.center
+                        : WrapAlignment.start,
+                    spacing: 16,
+                    runSpacing: 16,
                     children: [
                       ElevatedButton(
                         onPressed: () => setState(() => isInCall = true),
@@ -3443,7 +4331,6 @@ class _LiveClassViewState extends State<LiveClassView> {
                           ),
                         ),
                       ),
-                      const SizedBox(width: 16),
                       OutlinedButton(
                         onPressed: () {},
                         style: OutlinedButton.styleFrom(
@@ -3467,10 +4354,11 @@ class _LiveClassViewState extends State<LiveClassView> {
                     ],
                   ),
                   const SizedBox(height: 40),
-                  const Text(
+                  Text(
                     'Other joining options',
                     style: TextStyle(
-                      color: Colors.grey,
+                      color: Colors.grey.shade600,
+                      fontSize: 14,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
@@ -3480,17 +4368,21 @@ class _LiveClassViewState extends State<LiveClassView> {
                     icon: const Icon(
                       Icons.screen_share,
                       color: Color(0xFF6C5CE7),
+                      size: 20,
                     ),
                     label: const Text(
                       'Use companion mode',
-                      style: TextStyle(color: Color(0xFF6C5CE7)),
+                      style: TextStyle(
+                        color: Color(0xFF6C5CE7),
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
                 ],
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -3584,233 +4476,270 @@ class _LiveClassViewState extends State<LiveClassView> {
 
   Widget _buildGoogleMeetHome() {
     bool isTeacher = AppData().currentUserRole == UserRole.teacher;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isMobile = screenWidth < 800;
 
-    return Container(
-      color: Colors.white,
-      padding: const EdgeInsets.all(60),
-      child: Center(
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+    return SingleChildScrollView(
+      child: Container(
+        color: Colors.white,
+        padding: EdgeInsets.all(isMobile ? 24 : 60),
+        child: Column(
           children: [
-            Expanded(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
+            if (isMobile) ...[
+              const SizedBox(height: 20),
+              _buildMeetIllustration(isMobile, screenWidth),
+              const SizedBox(height: 40),
+            ],
+            Flex(
+              direction: isMobile ? Axis.vertical : Axis.horizontal,
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                Expanded(
+                  flex: isMobile ? 0 : 1,
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: isMobile
+                        ? CrossAxisAlignment.center
+                        : CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Premium video meetings. Now free for everyone.',
+                        textAlign: isMobile
+                            ? TextAlign.center
+                            : TextAlign.start,
+                        style: TextStyle(
+                          fontSize: isMobile ? 28 : 48,
+                          fontWeight: FontWeight.bold,
+                          height: 1.1,
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      Text(
+                        'We re-engineered the service we built for secure business meetings, Google Meet, to make it free and available for all.',
+                        textAlign: isMobile
+                            ? TextAlign.center
+                            : TextAlign.start,
+                        style: TextStyle(
+                          color: Colors.grey,
+                          fontSize: isMobile ? 15 : 18,
+                          height: 1.5,
+                        ),
+                      ),
+                      const SizedBox(height: 48),
+                      if (isTeacher)
+                        _buildTeacherActions(isMobile)
+                      else
+                        _buildStudentActions(isMobile),
+                      const SizedBox(height: 32),
+                      Divider(color: Colors.grey.shade300),
+                      const SizedBox(height: 32),
+                      TextButton.icon(
+                        onPressed: () {},
+                        icon: const Text(
+                          'Learn more',
+                          style: TextStyle(color: Color(0xFF6C5CE7)),
+                        ),
+                        label: const Text(
+                          'about Google Meet',
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (!isMobile) ...[
+                  const SizedBox(width: 80),
+                  Expanded(
+                    flex: 1,
+                    child: _buildMeetIllustration(isMobile, screenWidth),
+                  ),
+                ],
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMeetIllustration(bool isMobile, double screenWidth) {
+    return Center(
+      child: CircleAvatar(
+        radius: isMobile ? screenWidth * 0.3 : 150,
+        backgroundColor: const Color(0xFF6C5CE7).withAlpha(20),
+        child: Icon(
+          Icons.groups,
+          size: isMobile ? screenWidth * 0.2 : 120,
+          color: const Color(0xFF6C5CE7),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTeacherActions(bool isMobile) {
+    return Column(
+      crossAxisAlignment: isMobile
+          ? CrossAxisAlignment.center
+          : CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: isMobile ? double.infinity : null,
+          child: ElevatedButton.icon(
+            onPressed: _generateAndShowMeetingCode,
+            icon: const Icon(Icons.video_call),
+            label: const Text('New meeting'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF6C5CE7),
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+          ),
+        ),
+        if (AppData().activeMeetingCode != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 16),
+            child: Text(
+              'Active Session Code: ${AppData().activeMeetingCode}',
+              style: const TextStyle(
+                fontWeight: FontWeight.w600,
+                color: Colors.green,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildStudentActions(bool isMobile) {
+    return Column(
+      crossAxisAlignment: isMobile
+          ? CrossAxisAlignment.center
+          : CrossAxisAlignment.start,
+      children: [
+        Flex(
+          direction: isMobile ? Axis.vertical : Axis.horizontal,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: isMobile ? double.infinity : 280,
+              height: 56,
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.grey.shade400),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
                 children: [
-                  const Text(
-                    'Premium video meetings.\nNow free for everyone.',
-                    style: TextStyle(
-                      fontSize: 48,
-                      fontWeight: FontWeight.bold,
-                      height: 1.1,
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                  const Text(
-                    'We re-engineered the service we built for secure business meetings, Google Meet, to make it free and available for all.',
-                    style: TextStyle(
-                      color: Colors.grey,
-                      fontSize: 18,
-                      height: 1.5,
-                    ),
-                  ),
-                  const SizedBox(height: 48),
-                  if (isTeacher) ...[
-                    ElevatedButton.icon(
-                      onPressed: () {
-                        String newCode = stringIdGenerator();
-                        AppData().setMeetingCode(newCode);
-                        showDialog(
-                          context: context,
-                          builder: (ctx) => AlertDialog(
-                            title: const Text("Here's your meeting link"),
-                            content: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  "Copy this link and send it to people you want to meet with. Be sure to save it so you can use it later, too.",
-                                ),
-                                const SizedBox(height: 16),
-                                Container(
-                                  decoration: BoxDecoration(
-                                    color: Colors.grey.shade100,
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                  child: ListTile(
-                                    title: Text(
-                                      newCode,
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                        letterSpacing: 1.2,
-                                      ),
-                                    ),
-                                    trailing: IconButton(
-                                      icon: const Icon(
-                                        Icons.copy,
-                                        color: Colors.grey,
-                                      ),
-                                      onPressed: () {
-                                        Clipboard.setData(
-                                          ClipboardData(text: newCode),
-                                        );
-                                        ScaffoldMessenger.of(
-                                          context,
-                                        ).showSnackBar(
-                                          const SnackBar(
-                                            content: Text(
-                                              'Meeting code copied!',
-                                            ),
-                                          ),
-                                        );
-                                      },
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            actions: [
-                              TextButton(
-                                onPressed: () {
-                                  Navigator.pop(ctx);
-                                  setState(() => isCodeVerified = true);
-                                },
-                                child: const Text(
-                                  'Join Now',
-                                  style: TextStyle(
-                                    color: Color(0xFF6C5CE7),
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        );
-                      },
-                      icon: const Icon(Icons.video_call),
-                      label: const Text('New meeting'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF6C5CE7),
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 24,
-                          vertical: 20,
-                        ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8),
-                        ),
+                  const Icon(Icons.keyboard, color: Colors.grey),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: TextField(
+                      controller: joinCodeCtrl,
+                      onChanged: (val) => setState(() => joinErrorMsg = null),
+                      decoration: const InputDecoration(
+                        hintText: 'Enter a code or link',
+                        border: InputBorder.none,
+                        isDense: true,
                       ),
-                    ),
-                    if (AppData().activeMeetingCode != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 16),
-                        child: Text(
-                          'Active Session Code: ${AppData().activeMeetingCode}',
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w600,
-                            color: Colors.green,
-                          ),
-                        ),
-                      ),
-                  ] else ...[
-                    Row(
-                      children: [
-                        Container(
-                          width: 280,
-                          height: 56,
-                          decoration: BoxDecoration(
-                            border: Border.all(color: Colors.grey.shade400),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          padding: const EdgeInsets.symmetric(horizontal: 16),
-                          child: Row(
-                            children: [
-                              const Icon(Icons.keyboard, color: Colors.grey),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: TextField(
-                                  controller: joinCodeCtrl,
-                                  onChanged: (val) =>
-                                      setState(() => joinErrorMsg = null),
-                                  decoration: const InputDecoration(
-                                    hintText: 'Enter a code or link',
-                                    border: InputBorder.none,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(width: 16),
-                        TextButton(
-                          onPressed: () {
-                            if (joinCodeCtrl.text.trim() ==
-                                AppData().activeMeetingCode) {
-                              setState(() => isCodeVerified = true);
-                            } else {
-                              setState(
-                                () => joinErrorMsg =
-                                    'Invalid code. Wait for teacher to create a meeting.',
-                              );
-                            }
-                          },
-                          child: Text(
-                            'Join',
-                            style: TextStyle(
-                              color: joinCodeCtrl.text.isEmpty
-                                  ? Colors.grey
-                                  : const Color(0xFF6C5CE7),
-                              fontWeight: FontWeight.w600,
-                              fontSize: 16,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    if (joinErrorMsg != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 8),
-                        child: Text(
-                          joinErrorMsg!,
-                          style: const TextStyle(
-                            color: Colors.red,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                  ],
-                  const SizedBox(height: 32),
-                  Divider(color: Colors.grey.shade300),
-                  const SizedBox(height: 32),
-                  TextButton.icon(
-                    onPressed: () {},
-                    icon: const Text(
-                      'Learn more',
-                      style: TextStyle(color: Color(0xFF6C5CE7)),
-                    ),
-                    label: const Text(
-                      'about Google Meet',
-                      style: TextStyle(color: Colors.grey),
                     ),
                   ),
                 ],
               ),
             ),
-            Expanded(
-              child: Center(
-                child: CircleAvatar(
-                  radius: 120,
-                  backgroundColor: const Color(0xFF6C5CE7).withAlpha(20),
-                  child: const Icon(
-                    Icons.groups,
-                    size: 100,
-                    color: Color(0xFF6C5CE7),
-                  ),
+            SizedBox(width: isMobile ? 0 : 16, height: isMobile ? 12 : 0),
+            TextButton(
+              onPressed: () {
+                if (joinCodeCtrl.text.trim() == AppData().activeMeetingCode) {
+                  setState(() => isCodeVerified = true);
+                } else {
+                  setState(() => joinErrorMsg = 'Invalid meeting code');
+                }
+              },
+              child: Text(
+                'Join',
+                style: TextStyle(
+                  fontSize: 16,
+                  color: joinCodeCtrl.text.isEmpty
+                      ? Colors.grey
+                      : const Color(0xFF6C5CE7),
+                  fontWeight: FontWeight.bold,
                 ),
               ),
             ),
           ],
         ),
+        if (joinErrorMsg != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(
+              joinErrorMsg!,
+              style: const TextStyle(color: Colors.red, fontSize: 13),
+            ),
+          ),
+      ],
+    );
+  }
+
+  void _generateAndShowMeetingCode() {
+    String newCode = stringIdGenerator();
+    AppData().setMeetingCode(newCode);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Here's your meeting link"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              "Copy this link and send it to people you want to meet with.",
+            ),
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: ListTile(
+                title: Text(
+                  newCode,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+                trailing: IconButton(
+                  icon: const Icon(Icons.copy, color: Colors.grey),
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: newCode));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Code copied!')),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              setState(() => isCodeVerified = true);
+            },
+            child: const Text(
+              'Join Now',
+              style: TextStyle(
+                color: Color(0xFF6C5CE7),
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -3820,296 +4749,332 @@ class _LiveClassViewState extends State<LiveClassView> {
     if (!isCodeVerified) return _buildGoogleMeetHome();
     if (!isInCall) return _buildPreCall();
 
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isMobile = screenWidth < 800;
+
     return Container(
-      color: const Color(0xFF202124), // Google Meet dark grey background
-      child: Row(
-        children: [
-          // Video Area
-          Expanded(
-            flex: 3,
-            child: Column(
-              children: [
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: GridView.builder(
-                      itemCount: 6,
-                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: isChatOpen ? 2 : 3,
-                        crossAxisSpacing: 16,
-                        mainAxisSpacing: 16,
-                        childAspectRatio: 16 / 9,
-                      ),
-                      itemBuilder: (ctx, i) {
-                        return Container(
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF3C4043),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          clipBehavior: Clip.antiAlias,
-                          child: _buildStudentThumbnail(i),
-                        );
-                      },
-                    ),
-                  ),
-                ),
-                // Bottom Meet Controls Bar
-                Container(
-                  height: 80,
-                  padding: const EdgeInsets.symmetric(horizontal: 24),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Text(
-                        "10:24 AM • Class Sync",
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 16,
-                        ),
-                      ),
-                      Row(
-                        children: [
-                          _buildControlBtn(
-                            isMicMuted ? Icons.mic_off : Icons.mic_none,
-                            isMicMuted ? Colors.red : const Color(0xFF3C4043),
-                            () => setState(() => isMicMuted = !isMicMuted),
-                            iconColor: Colors.white,
-                          ),
-                          const SizedBox(width: 12),
-                          _buildControlBtn(
-                            isVideoOff
-                                ? Icons.videocam_off
-                                : Icons.videocam_outlined,
-                            isVideoOff ? Colors.red : const Color(0xFF3C4043),
-                            () => setState(() => isVideoOff = !isVideoOff),
-                            iconColor: Colors.white,
-                          ),
-                          const SizedBox(width: 12),
-                          _buildControlBtn(
-                            Icons.closed_caption_off_outlined,
-                            const Color(0xFF3C4043),
-                            () {},
-                            iconColor: Colors.white,
-                          ),
-                          const SizedBox(width: 12),
-                          _buildControlBtn(
-                            Icons.back_hand_outlined,
-                            const Color(0xFF3C4043),
-                            () {},
-                            iconColor: Colors.white,
-                          ),
-                          const SizedBox(width: 12),
-                          _buildControlBtn(
-                            Icons.present_to_all_outlined,
-                            const Color(0xFF3C4043),
-                            () {},
-                            iconColor: Colors.white,
-                          ),
-                          const SizedBox(width: 12),
-                          _buildControlBtn(
-                            Icons.more_vert,
-                            const Color(0xFF3C4043),
-                            () {},
-                            iconColor: Colors.white,
-                          ),
-                          const SizedBox(width: 12),
-                          _buildControlBtn(
-                            Icons.call_end,
-                            Colors.red,
-                            () {
-                              setState(() => isInCall = false);
-                            },
-                            iconColor: Colors.white,
-                            isLarge: true,
-                          ),
-                        ],
-                      ),
-                      Row(
-                        children: [
-                          IconButton(
-                            icon: const Icon(
-                              Icons.info_outline,
-                              color: Colors.white,
-                            ),
-                            onPressed: () {},
-                          ),
-                          IconButton(
-                            icon: const Icon(
-                              Icons.people_outline,
-                              color: Colors.white,
-                            ),
-                            onPressed: () {},
-                          ),
-                          IconButton(
-                            icon: Icon(
-                              Icons.chat_bubble_outline,
-                              color: isChatOpen
-                                  ? const Color(0xFF8AB4F8)
-                                  : Colors.white,
-                            ),
-                            onPressed: () =>
-                                setState(() => isChatOpen = !isChatOpen),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          // Right Chat Panel (Toggleable)
-          if (isChatOpen)
-            Container(
-              width: 320,
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(16),
-                ),
-              ),
-              margin: const EdgeInsets.only(top: 16),
-              child: Column(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.all(24.0),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text(
-                          'In-call messages',
-                          style: TextStyle(
-                            color: Colors.black87,
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.close, color: Colors.grey),
-                          onPressed: () => setState(() => isChatOpen = false),
-                        ),
-                      ],
-                    ),
-                  ),
-                  Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 24),
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: Colors.grey.shade100,
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: const Text(
-                      'Messages can only be seen by people in the call and are deleted when the call ends.',
-                      style: TextStyle(color: Colors.grey, fontSize: 12),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Expanded(
-                    child: ListView(
-                      padding: const EdgeInsets.symmetric(horizontal: 24),
-                      children: [
-                        _buildChatMsg(
-                          'Student 2',
-                          'Can you re-explain the velocity formula?',
-                          '10:02 AM',
-                        ),
-                        _buildChatMsg(
-                          'Prof. Alan',
-                          'Yes, let me pull up the slide again.',
-                          '10:03 AM',
-                        ),
-                      ],
-                    ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.all(24.0),
-                    child: TextField(
-                      decoration: InputDecoration(
-                        hintText: 'Send a message to everyone',
-                        hintStyle: TextStyle(
-                          color: Colors.grey.shade600,
-                          fontSize: 14,
-                        ),
-                        filled: true,
-                        fillColor: Colors.grey.shade100,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
-                          borderSide: BorderSide.none,
-                        ),
-                        suffixIcon: const Icon(
-                          Icons.send,
-                          color: Color(0xFF6C5CE7),
-                        ),
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 20,
-                          vertical: 16,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildControlBtn(
-    IconData icon,
-    Color bgColor,
-    VoidCallback onTap, {
-    bool isLarge = false,
-    Color iconColor = Colors.white,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        height: isLarge ? 56 : 48,
-        width: isLarge ? 80 : 48,
-        decoration: BoxDecoration(
-          color: bgColor,
-          borderRadius: BorderRadius.circular(30),
-        ),
-        child: Icon(icon, color: iconColor, size: isLarge ? 28 : 22),
-      ),
-    );
-  }
-
-  Widget _buildChatMsg(String name, String msg, String time) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      color: const Color(0xFF202124), // Google Meet dark grey
+      child: Stack(
         children: [
           Row(
             children: [
-              Text(
-                name,
-                style: const TextStyle(
-                  color: Colors.black87,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 14,
+              // Video Area
+              Expanded(
+                flex: 3,
+                child: Column(
+                  children: [
+                    Expanded(
+                      child: Padding(
+                        padding: EdgeInsets.all(isMobile ? 8.0 : 16.0),
+                        child: GridView.builder(
+                          itemCount: 6,
+                          gridDelegate:
+                              SliverGridDelegateWithFixedCrossAxisCount(
+                                crossAxisCount: isMobile
+                                    ? 2
+                                    : (isChatOpen ? 2 : 3),
+                                crossAxisSpacing: isMobile ? 8 : 16,
+                                mainAxisSpacing: isMobile ? 8 : 16,
+                                childAspectRatio: isMobile ? 1.0 : (16 / 9),
+                              ),
+                          itemBuilder: (ctx, i) {
+                            return Container(
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF3C4043),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              clipBehavior: Clip.antiAlias,
+                              child: _buildStudentThumbnail(i),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                    // Bottom Meet Controls Bar
+                    Container(
+                      height: 80,
+                      padding: EdgeInsets.symmetric(
+                        horizontal: isMobile ? 12 : 24,
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          if (!isMobile)
+                            const Text(
+                              "10:24 AM • Class Sync",
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w600,
+                                fontSize: 16,
+                              ),
+                            ),
+                          // Center Controls
+                          Expanded(
+                            child: Row(
+                              mainAxisAlignment: isMobile
+                                  ? MainAxisAlignment.start
+                                  : MainAxisAlignment.center,
+                              children: [
+                                _buildControlBtn(
+                                  isMicMuted ? Icons.mic_off : Icons.mic_none,
+                                  isMicMuted
+                                      ? Colors.red
+                                      : const Color(0xFF3C4043),
+                                  () =>
+                                      setState(() => isMicMuted = !isMicMuted),
+                                  iconColor: Colors.white,
+                                  size: isMobile ? 20 : 24,
+                                ),
+                                const SizedBox(width: 8),
+                                _buildControlBtn(
+                                  isVideoOff
+                                      ? Icons.videocam_off
+                                      : Icons.videocam_outlined,
+                                  isVideoOff
+                                      ? Colors.red
+                                      : const Color(0xFF3C4043),
+                                  () =>
+                                      setState(() => isVideoOff = !isVideoOff),
+                                  iconColor: Colors.white,
+                                  size: isMobile ? 20 : 24,
+                                ),
+                                if (!isMobile) ...[
+                                  const SizedBox(width: 8),
+                                  _buildControlBtn(
+                                    Icons.closed_caption_off_outlined,
+                                    const Color(0xFF3C4043),
+                                    () {},
+                                    iconColor: Colors.white,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  _buildControlBtn(
+                                    Icons.back_hand_outlined,
+                                    const Color(0xFF3C4043),
+                                    () {},
+                                    iconColor: Colors.white,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  _buildControlBtn(
+                                    Icons.present_to_all_outlined,
+                                    const Color(0xFF3C4043),
+                                    () {},
+                                    iconColor: Colors.white,
+                                  ),
+                                ],
+                                const SizedBox(width: 8),
+                                _buildControlBtn(
+                                  Icons.call_end,
+                                  Colors.red,
+                                  () => setState(() => isInCall = false),
+                                  iconColor: Colors.white,
+                                  isLarge: true,
+                                  size: isMobile ? 20 : 24,
+                                ),
+                              ],
+                            ),
+                          ),
+                          // Right Controls
+                          Row(
+                            children: [
+                              if (!isMobile)
+                                IconButton(
+                                  icon: const Icon(
+                                    Icons.info_outline,
+                                    color: Colors.white,
+                                  ),
+                                  onPressed: () {},
+                                ),
+                              IconButton(
+                                icon: const Icon(
+                                  Icons.people_outline,
+                                  color: Colors.white,
+                                  size: 20,
+                                ),
+                                onPressed: () {},
+                              ),
+                              IconButton(
+                                icon: Icon(
+                                  Icons.chat_bubble_outline,
+                                  color: isChatOpen
+                                      ? const Color(0xFF8AB4F8)
+                                      : Colors.white,
+                                  size: 20,
+                                ),
+                                onPressed: () =>
+                                    setState(() => isChatOpen = !isChatOpen),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(width: 8),
-              Text(
-                time,
-                style: TextStyle(color: Colors.grey.shade500, fontSize: 11),
-              ),
+
+              // Desktop Chat Panel
+              if (!isMobile && isChatOpen)
+                Container(
+                  width: 320,
+                  decoration: const BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.only(
+                      topLeft: Radius.circular(16),
+                    ),
+                  ),
+                  margin: const EdgeInsets.only(top: 16),
+                  child: _buildChatContent(),
+                ),
             ],
           ),
-          const SizedBox(height: 4),
-          Text(
-            msg,
-            style: const TextStyle(color: Colors.black87, fontSize: 14),
-          ),
+
+          // Mobile Chat Overlay
+          if (isMobile && isChatOpen)
+            Positioned.fill(
+              child: Container(color: Colors.white, child: _buildChatContent()),
+            ),
         ],
       ),
     );
   }
+
+  Widget _buildChatContent() {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                'In-call messages',
+                style: TextStyle(
+                  color: Colors.black87,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.close, color: Colors.grey),
+                onPressed: () => setState(() => isChatOpen = false),
+              ),
+            ],
+          ),
+        ),
+        Container(
+          margin: const EdgeInsets.symmetric(horizontal: 24),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.grey.shade100,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: const Text(
+            'Messages can only be seen by people in the call and are deleted when the call ends.',
+            style: TextStyle(color: Colors.grey, fontSize: 12),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.symmetric(horizontal: 24),
+            children: [
+              _buildChatMsg(
+                'Student 2',
+                'Can you re-explain the velocity formula?',
+                '10:02 AM',
+              ),
+              _buildChatMsg(
+                'Prof. Alan',
+                'Yes, let me pull up the slide again.',
+                '10:03 AM',
+              ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: TextField(
+            decoration: InputDecoration(
+              hintText: 'Send a message to everyone',
+              hintStyle: TextStyle(color: Colors.grey.shade600, fontSize: 14),
+              filled: true,
+              fillColor: Colors.grey.shade100,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(24),
+                borderSide: BorderSide.none,
+              ),
+              suffixIcon: const Icon(Icons.send, color: Color(0xFF6C5CE7)),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 20,
+                vertical: 12,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+Widget _buildControlBtn(
+  IconData icon,
+  Color bgColor,
+  VoidCallback onTap, {
+  bool isLarge = false,
+  Color iconColor = Colors.white,
+  double? size,
+}) {
+  double containerWidth = isLarge ? 80 : 48;
+  double containerHeight = isLarge ? 56 : 48;
+
+  // Scale container if custom size is provided
+  if (size != null) {
+    containerWidth = isLarge ? size * 3 : size * 2;
+    containerHeight = isLarge ? size * 2.2 : size * 2;
+  }
+
+  return GestureDetector(
+    onTap: onTap,
+    child: Container(
+      height: containerHeight,
+      width: containerWidth,
+      decoration: BoxDecoration(
+        color: bgColor,
+        borderRadius: BorderRadius.circular(30),
+      ),
+      child: Icon(icon, color: iconColor, size: size ?? (isLarge ? 28 : 22)),
+    ),
+  );
+}
+
+Widget _buildChatMsg(String name, String msg, String time) {
+  return Padding(
+    padding: const EdgeInsets.only(bottom: 24),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Text(
+              name,
+              style: const TextStyle(
+                color: Colors.black87,
+                fontWeight: FontWeight.bold,
+                fontSize: 14,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              time,
+              style: TextStyle(color: Colors.grey.shade500, fontSize: 11),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(msg, style: const TextStyle(color: Colors.black87, fontSize: 14)),
+      ],
+    ),
+  );
 }
 
 // ---------------------------------------------------------
@@ -4126,6 +5091,9 @@ class _AssignmentsViewState extends State<AssignmentsView> {
   @override
   Widget build(BuildContext context) {
     bool isTeacher = AppData().currentUserRole == UserRole.teacher;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isMobile = screenWidth < 800;
+
     // Flatten assignments
     List<Map<String, dynamic>> allAssignments = [];
     for (var cls in AppData().filteredClasses) {
@@ -4140,39 +5108,69 @@ class _AssignmentsViewState extends State<AssignmentsView> {
     return Scaffold(
       backgroundColor: Colors.transparent,
       body: Padding(
-        padding: const EdgeInsets.all(40.0),
+        padding: EdgeInsets.all(isMobile ? 16.0 : 40.0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  isTeacher
-                      ? 'Assignments To Review'
-                      : 'Your Assignments To-Do',
-                  style: const TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                if (isTeacher)
-                  ElevatedButton.icon(
-                    onPressed: () => _openCreateAssignmentDialog(context),
-                    icon: const Icon(Icons.add),
-                    label: const Text('Create Global Assignment'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF6C5CE7),
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 24,
-                        vertical: 16,
+            isMobile
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        isTeacher ? 'Review Assignments' : 'Your To-Do',
+                        style: const TextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
-                    ),
+                      if (isTeacher) ...[
+                        const SizedBox(height: 12),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            onPressed: () =>
+                                _openCreateAssignmentDialog(context),
+                            icon: const Icon(Icons.add),
+                            label: const Text('New Global Assignment'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF6C5CE7),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  )
+                : Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        isTeacher
+                            ? 'Assignments To Review'
+                            : 'Your Assignments To-Do',
+                        style: const TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      if (isTeacher)
+                        ElevatedButton.icon(
+                          onPressed: () => _openCreateAssignmentDialog(context),
+                          icon: const Icon(Icons.add),
+                          label: const Text('Create Global Assignment'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF6C5CE7),
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 24,
+                              vertical: 16,
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
-              ],
-            ),
-            const SizedBox(height: 32),
+            SizedBox(height: isMobile ? 16 : 32),
             Expanded(
               child: ListView.builder(
                 itemCount: allAssignments.length,
@@ -4197,96 +5195,94 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                             builder: (_) => AssignmentInteractionScreen(
                               assignment: a,
                               classColor: cls['color'],
+                              classData: cls,
                             ),
                           ),
                         );
                       },
                       child: Padding(
-                        padding: const EdgeInsets.all(24.0),
+                        padding: EdgeInsets.all(isMobile ? 16.0 : 24.0),
                         child: Row(
                           children: [
                             CircleAvatar(
-                              radius: 24,
+                              radius: isMobile ? 20 : 24,
                               backgroundColor: cls['color'].withAlpha(20),
                               child: Icon(
                                 Icons.assignment,
                                 color: cls['color'],
+                                size: isMobile ? 20 : 24,
                               ),
                             ),
-                            const SizedBox(width: 24),
+                            const SizedBox(width: 16),
                             Expanded(
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
                                     a['title'],
-                                    style: const TextStyle(
-                                      fontSize: 18,
+                                    style: TextStyle(
+                                      fontSize: isMobile ? 16 : 18,
                                       fontWeight: FontWeight.bold,
                                     ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                   ),
                                   const SizedBox(height: 4),
                                   Text(
                                     (a['startDateTime'] != null &&
                                             a['dueDateTime'] != null)
-                                        ? '${cls['title']}\nWindow: ${a['startDateTime'].toString().substring(0, 16)} to ${a['dueDateTime'].toString().substring(0, 16)}  •  ${a['year']} ${a['semester']}'
-                                        : '${cls['title']}  •  Due: ${a['dueDate']}  •  ${a['year']} ${a['semester']}',
+                                        ? '${cls['title']}\n${a['dueDateTime'].toString().substring(0, 16)}'
+                                        : '${cls['title']}  •  Due: ${a['dueDate']}',
                                     style: TextStyle(
                                       color: Colors.grey.shade600,
+                                      fontSize: isMobile ? 12 : 14,
                                     ),
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
                                   ),
-                                  if (a['instructorFileName'] != null)
-                                    Padding(
-                                      padding: const EdgeInsets.only(top: 4),
-                                      child: Row(
-                                        children: [
-                                          const Icon(
-                                            Icons.attach_file,
-                                            size: 14,
-                                            color: Colors.grey,
-                                          ),
-                                          const SizedBox(width: 4),
-                                          Text(
-                                            a['instructorFileName'],
-                                            style: TextStyle(
-                                              fontSize: 12,
-                                              color: Colors.grey.shade600,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
                                 ],
                               ),
                             ),
                             if (isTeacher)
-                              Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    '${AppData().registeredStudents.length} Assigned',
-                                    style: const TextStyle(
-                                      color: Color(0xFF6C5CE7),
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  IconButton(
-                                    icon: const Icon(
-                                      Icons.delete_outline,
-                                      color: Colors.red,
-                                    ),
-                                    tooltip: 'Delete Assignment',
-                                    onPressed: () {
-                                      _showDeleteConfirmation(
+                              isMobile
+                                  ? IconButton(
+                                      icon: const Icon(
+                                        Icons.delete_outline,
+                                        color: Colors.red,
+                                        size: 20,
+                                      ),
+                                      onPressed: () => _showDeleteConfirmation(
                                         context,
                                         cls['id'],
                                         a['id'],
-                                      );
-                                    },
-                                  ),
-                                ],
-                              )
+                                      ),
+                                    )
+                                  : Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          'Assigned',
+                                          style: TextStyle(
+                                            color: const Color(0xFF6C5CE7),
+                                            fontWeight: FontWeight.w600,
+                                            fontSize: 13,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        IconButton(
+                                          icon: const Icon(
+                                            Icons.delete_outline,
+                                            color: Colors.red,
+                                          ),
+                                          onPressed: () =>
+                                              _showDeleteConfirmation(
+                                                context,
+                                                cls['id'],
+                                                a['id'],
+                                              ),
+                                        ),
+                                      ],
+                                    )
                             else
                               a['isDone']
                                   ? const Icon(
@@ -4346,11 +5342,13 @@ class _AssignmentsViewState extends State<AssignmentsView> {
     TextEditingController titleCtrl = TextEditingController();
     DateTime startDateTime = DateTime.now();
     DateTime endDateTime = DateTime.now().add(const Duration(days: 7));
-    String? selectedClassId = AppData().filteredClasses.first['id'];
-    String selectedYear = AppData().loggedYear ?? 'All';
-    String selectedSem = AppData().loggedSemester ?? 'All';
     PlatformFile? pickedFile;
     List<dynamic>? mcqData;
+    String selectedYear = AppData().loggedYear ?? 'All';
+    String selectedSem = AppData().loggedSemester ?? 'All';
+    String? currentSelectedClassId = AppData().filteredClasses.isNotEmpty
+        ? AppData().filteredClasses.first['id']
+        : null;
 
     showDialog(
       context: context,
@@ -4366,6 +5364,34 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      const SizedBox(height: 16),
+                      DropdownButtonFormField<String>(
+                        value: currentSelectedClassId,
+                        style: GoogleFonts.outfit(
+                          fontSize: 14,
+                          color: Colors.black,
+                        ),
+                        decoration: const InputDecoration(
+                          labelText: 'Target Course',
+                          prefixIcon: Icon(Icons.class_outlined),
+                          border: OutlineInputBorder(),
+                        ),
+                        isExpanded: true,
+                        hint: const Text('Select handled course'),
+                        items: AppData().filteredClasses.map((cls) {
+                          return DropdownMenuItem<String>(
+                            value: cls['id'],
+                            child: Text(
+                              cls['title'],
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          );
+                        }).toList(),
+                        onChanged: (val) => setDialogState(
+                          () => currentSelectedClassId = val,
+                        ),
+                        validator: (v) => v == null ? 'Required' : null,
+                      ),
                       const SizedBox(height: 16),
                       TextField(
                         controller: titleCtrl,
@@ -4478,9 +5504,10 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                 ),
                 ElevatedButton(
                   onPressed: () {
-                    if (titleCtrl.text.isNotEmpty && selectedClassId != null) {
+                    if (titleCtrl.text.isNotEmpty &&
+                        currentSelectedClassId != null) {
                       AppData().addAssignment(
-                        selectedClassId!,
+                        currentSelectedClassId!,
                         titleCtrl.text,
                         endDateTime.toString().substring(0, 16),
                         year: selectedYear,
@@ -4491,7 +5518,7 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                         dueDateTime: endDateTime,
                       );
                       Navigator.pop(ctx);
-                      setState(() {}); // refresh global list
+                      setState(() {});
                     }
                   },
                   style: ElevatedButton.styleFrom(
@@ -4522,22 +5549,32 @@ class ClassDetailScreen extends StatefulWidget {
 
 class _ClassDetailScreenState extends State<ClassDetailScreen> {
   @override
+  void initState() {
+    super.initState();
+    // Fetch students enrolled in this course (based on department title)
+    AppData().fetchStudentsByDepartment(widget.classData['title']);
+  }
+
+  @override
   Widget build(BuildContext context) {
     bool isTeacher = AppData().currentUserRole == UserRole.teacher;
     String classId = widget.classData['id'];
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isMobile = screenWidth < 900;
 
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.classData['title']),
         backgroundColor: Colors.white,
+        elevation: 0,
       ),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.all(40),
+        padding: EdgeInsets.all(isMobile ? 12 : 40),
         child: Column(
           children: [
             // Massive Header Banner
             Container(
-              height: 250,
+              height: isMobile ? 180 : 250,
               width: double.infinity,
               decoration: BoxDecoration(
                 color: widget.classData['color'],
@@ -4550,16 +5587,16 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                   ),
                 ],
               ),
-              padding: const EdgeInsets.all(40),
+              padding: EdgeInsets.all(isMobile ? 24 : 40),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.end,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
                     widget.classData['title'],
-                    style: const TextStyle(
+                    style: TextStyle(
                       color: Colors.white,
-                      fontSize: 36,
+                      fontSize: isMobile ? 22 : 36,
                       fontWeight: FontWeight.bold,
                     ),
                   ),
@@ -4567,264 +5604,418 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                     widget.classData['subtitle'],
                     style: TextStyle(
                       color: Colors.white.withAlpha(200),
-                      fontSize: 18,
+                      fontSize: isMobile ? 13 : 18,
                     ),
                   ),
                 ],
               ),
             ),
-            const SizedBox(height: 48),
+            SizedBox(height: isMobile ? 24 : 48),
 
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  flex: 2,
-                  child: Column(
+            isMobile
+                ? Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          const Text(
-                            'Classwork',
-                            style: TextStyle(
-                              fontSize: 24,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          if (isTeacher)
-                            ElevatedButton.icon(
-                              onPressed: () =>
-                                  _openCreateAssignmentDialog(context, classId),
-                              icon: const Icon(Icons.add),
-                              label: const Text('Create Assignment'),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF6C5CE7),
-                                foregroundColor: Colors.white,
-                              ),
-                            ),
-                        ],
-                      ),
+                      _buildClassworkHeader(isTeacher, classId, isMobile),
+                      const SizedBox(height: 16),
+                      _buildClassworkList(classId, isMobile, isTeacher),
                       const SizedBox(height: 24),
-                      AnimatedBuilder(
-                        animation: AppData(),
-                        builder: (ctx, _) {
-                          List assigns = AppData()
-                              .filteredAssignments(classId)
-                              .where((a) => a['mcqData'] == null)
-                              .toList();
-                          if (assigns.isEmpty)
-                            return const Text('No assignments yet.');
-
-                          return Column(
-                            children: assigns.map((a) {
-                              return Card(
-                                margin: const EdgeInsets.only(bottom: 16),
-                                elevation: 0,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(16),
-                                  side: BorderSide(color: Colors.grey.shade200),
-                                ),
-                                child: InkWell(
-                                  borderRadius: BorderRadius.circular(16),
-                                  onTap: () {
-                                    Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                        builder: (_) =>
-                                            AssignmentInteractionScreen(
-                                              assignment: a,
-                                              classColor:
-                                                  widget.classData['color'],
-                                            ),
-                                      ),
-                                    );
-                                  },
-                                  child: Padding(
-                                    padding: const EdgeInsets.all(24.0),
-                                    child: Row(
-                                      children: [
-                                        CircleAvatar(
-                                          radius: 24,
-                                          backgroundColor: widget
-                                              .classData['color']
-                                              .withAlpha(20),
-                                          child: Icon(
-                                            Icons.assignment,
-                                            color: widget.classData['color'],
-                                          ),
-                                        ),
-                                        const SizedBox(width: 24),
-                                        Expanded(
-                                          child: Column(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.start,
-                                            children: [
-                                              Text(
-                                                a['title'],
-                                                style: const TextStyle(
-                                                  fontSize: 18,
-                                                  fontWeight: FontWeight.bold,
-                                                ),
-                                              ),
-                                              const SizedBox(height: 4),
-                                              Text(
-                                                (a['startDateTime'] != null &&
-                                                        a['dueDateTime'] !=
-                                                            null)
-                                                    ? 'Window: ${a['startDateTime'].toString().substring(0, 16)} to ${a['dueDateTime'].toString().substring(0, 16)}  •  ${a['year']} ${a['semester']}'
-                                                    : 'Due: ${a['dueDate']}  •  ${a['year']} ${a['semester']}',
-                                                style: TextStyle(
-                                                  color: Colors.grey.shade600,
-                                                ),
-                                              ),
-                                              if (a['instructorFileName'] !=
-                                                  null)
-                                                Padding(
-                                                  padding:
-                                                      const EdgeInsets.only(
-                                                        top: 4,
-                                                      ),
-                                                  child: Row(
-                                                    children: [
-                                                      const Icon(
-                                                        Icons.attach_file,
-                                                        size: 14,
-                                                        color: Colors.grey,
-                                                      ),
-                                                      const SizedBox(width: 4),
-                                                      Text(
-                                                        a['instructorFileName'],
-                                                        style: TextStyle(
-                                                          fontSize: 12,
-                                                          color: Colors
-                                                              .grey
-                                                              .shade600,
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ),
-                                                ),
-                                            ],
-                                          ),
-                                        ),
-                                        if (isTeacher)
-                                          Row(
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              Text(
-                                                ((a['isDone'] ?? false) &&
-                                                        !(a['isMissed'] ??
-                                                            false))
-                                                    ? '1 Submitted'
-                                                    : '0 Submitted',
-                                                style: const TextStyle(
-                                                  color: Color(0xFF6C5CE7),
-                                                  fontWeight: FontWeight.w600,
-                                                ),
-                                              ),
-                                              const SizedBox(width: 8),
-                                              IconButton(
-                                                icon: const Icon(
-                                                  Icons.delete_outline,
-                                                  color: Colors.red,
-                                                  size: 20,
-                                                ),
-                                                onPressed: () {
-                                                  _showDeleteConfirmation(
-                                                    context,
-                                                    classId,
-                                                    a['id'],
-                                                  );
-                                                },
-                                              ),
-                                            ],
-                                          )
-                                        else if ((a['isDone'] ?? false) &&
-                                            !(a['isMissed'] ?? false))
-                                          const Icon(
-                                            Icons.check_circle,
-                                            color: Colors.green,
-                                          )
-                                        else if ((a['dueDateTime'] != null &&
-                                                DateTime.now().isAfter(
-                                                  a['dueDateTime'],
-                                                )) ||
-                                            (a['isMissed'] ?? false))
-                                          Row(
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              const Icon(
-                                                Icons.error_outline,
-                                                color: Colors.red,
-                                              ),
-                                              const SizedBox(width: 4),
-                                              const Text(
-                                                'Test Is Over',
-                                                style: TextStyle(
-                                                  color: Colors.red,
-                                                  fontWeight: FontWeight.bold,
-                                                  fontSize: 12,
-                                                ),
-                                              ),
-                                            ],
-                                          )
-                                        else
-                                          const Icon(
-                                            Icons.pending_actions,
-                                            color: Colors.orange,
-                                          ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              );
-                            }).toList(),
-                          );
-                        },
+                      _buildUpcomingDueCard(),
+                      const SizedBox(height: 24),
+                      _buildEnrolledStudentsSection(isMobile),
+                    ],
+                  )
+                : Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        flex: 2,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _buildClassworkHeader(isTeacher, classId, isMobile),
+                            const SizedBox(height: 24),
+                            _buildClassworkList(classId, isMobile, isTeacher),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 32),
+                      Expanded(
+                        flex: 1,
+                        child: Column(
+                          children: [
+                            _buildUpcomingDueCard(),
+                            const SizedBox(height: 24),
+                            _buildEnrolledStudentsSection(isMobile),
+                          ],
+                        ),
                       ),
                     ],
                   ),
-                ),
-                const SizedBox(width: 48),
-                Expanded(
-                  flex: 1,
-                  child: Container(
-                    padding: const EdgeInsets.all(24),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: Colors.grey.shade200),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'Upcoming',
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        const Text('Woohoo, no work due soon!'),
-                        const SizedBox(height: 24),
-                        TextButton(
-                          onPressed: () {},
-                          child: const Text(
-                            'View all',
-                            style: TextStyle(color: Color(0xFF6C5CE7)),
-                          ),
-                        ),
-                      ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildClassworkHeader(bool isTeacher, String classId, bool isMobile) {
+    return isMobile
+        ? Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Classwork',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+              if (isTeacher) ...[
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: () =>
+                        _openCreateAssignmentDialog(context, classId),
+                    icon: const Icon(Icons.add),
+                    label: const Text('Create Assignment'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF6C5CE7),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
                     ),
                   ),
                 ),
               ],
-            ),
-          ],
+            ],
+          )
+        : Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                'Classwork',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+              ),
+              if (isTeacher)
+                ElevatedButton.icon(
+                  onPressed: () =>
+                      _openCreateAssignmentDialog(context, classId),
+                  icon: const Icon(Icons.add),
+                  label: const Text('Create Assignment'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF6C5CE7),
+                    foregroundColor: Colors.white,
+                  ),
+                ),
+            ],
+          );
+  }
+
+  Widget _buildClassworkList(String classId, bool isMobile, bool isTeacher) {
+    return AnimatedBuilder(
+      animation: AppData(),
+      builder: (ctx, _) {
+        List assigns = AppData()
+            .filteredAssignments(classId)
+            .where((a) => a['mcqData'] == null)
+            .toList();
+        if (assigns.isEmpty) return const Text('No assignments yet.');
+
+        return Column(
+          children: assigns.map((a) {
+            return Card(
+              margin: const EdgeInsets.only(bottom: 12),
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+                side: BorderSide(color: Colors.grey.shade200),
+              ),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(16),
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => AssignmentInteractionScreen(
+                        assignment: a,
+                        classColor: widget.classData['color'],
+                        classData: widget.classData,
+                      ),
+                    ),
+                  );
+                },
+                child: Padding(
+                  padding: EdgeInsets.all(isMobile ? 12.0 : 24.0),
+                  child: Row(
+                    children: [
+                      CircleAvatar(
+                        radius: isMobile ? 18 : 24,
+                        backgroundColor: widget.classData['color'].withAlpha(
+                          20,
+                        ),
+                        child: Icon(
+                          Icons.assignment,
+                          color: widget.classData['color'],
+                          size: isMobile ? 18 : 24,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              a['title'],
+                              style: TextStyle(
+                                fontSize: isMobile ? 15 : 18,
+                                fontWeight: FontWeight.bold,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              (a['dueDateTime'] != null)
+                                  ? '${a['dueDateTime'].toString().substring(0, 16)}'
+                                  : 'Due: ${a['dueDate']}',
+                              style: TextStyle(
+                                color: Colors.grey.shade600,
+                                fontSize: isMobile ? 11 : 14,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (isTeacher)
+                        IconButton(
+                          icon: const Icon(
+                            Icons.delete_outline,
+                            color: Colors.red,
+                            size: 20,
+                          ),
+                          onPressed: () => _showDeleteConfirmation(
+                            context,
+                            classId,
+                            a['id'],
+                          ),
+                        )
+                      else if ((a['isDone'] ?? false) &&
+                          !(a['isMissed'] ?? false))
+                        const Icon(Icons.check_circle, color: Colors.green)
+                      else if ((a['dueDateTime'] != null &&
+                              DateTime.now().isAfter(a['dueDateTime'])) ||
+                          (a['isMissed'] ?? false))
+                        const Icon(Icons.error_outline, color: Colors.red)
+                      else
+                        const Icon(Icons.pending_actions, color: Colors.orange),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          }).toList(),
+        );
+      },
+    );
+  }
+
+  Widget _buildUpcomingDueCard() {
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.grey.shade100),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Course Information',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 16),
+          _buildInfoRowItem(
+            Icons.portrait,
+            'Faculty In-Charge',
+            widget.classData['teacherName'] ?? 'Dr. Rajesh Kumar',
+          ),
+          _buildInfoRowItem(
+            Icons.workspace_premium_outlined,
+            'Designation',
+            widget.classData['teacherDesignation'] ?? 'Professor',
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEnrolledStudentsSection(bool isMobile) {
+    return AnimatedBuilder(
+      animation: AppData(),
+      builder: (context, _) {
+        final students = AppData().enrolledStudents;
+        return Container(
+          padding: const EdgeInsets.all(24),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.grey.shade100),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    'Enrolled Students',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF6C5CE7).withAlpha(30),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      '${students.length}',
+                      style: const TextStyle(
+                        color: Color(0xFF6C5CE7),
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              if (students.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 20),
+                  child: Center(
+                    child: Text(
+                      'No students enrolled yet.',
+                      style: TextStyle(color: Colors.grey, fontSize: 13),
+                    ),
+                  ),
+                )
+              else
+                ListView.separated(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: students.length,
+                  separatorBuilder: (_, __) =>
+                      Divider(color: Colors.grey.shade100, height: 24),
+                  itemBuilder: (context, index) {
+                    final s = students[index];
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            CircleAvatar(
+                              radius: 16,
+                              backgroundColor: const Color(
+                                0xFF6C5CE7,
+                              ).withAlpha(20),
+                              child: Text(
+                                s['name']?.substring(0, 1).toUpperCase() ?? 'S',
+                                style: const TextStyle(
+                                  color: Color(0xFF6C5CE7),
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    s['name'] ?? 'Unknown Name',
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 14,
+                                    ),
+                                  ),
+                                  Text(
+                                    'Enroll: ${s['enrollno'] ?? s['Enrollment No']}',
+                                    style: TextStyle(
+                                      color: Colors.grey.shade500,
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Padding(
+                          padding: const EdgeInsets.only(left: 44),
+                          child: Row(
+                            children: [
+                              _buildStudentTag(s['year'] ?? 'N/A'),
+                              const SizedBox(width: 8),
+                              _buildStudentTag('Sem ${s['semester'] ?? 'N/A'}'),
+                            ],
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildStudentTag(String label) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade100,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: Colors.grey.shade700,
+          fontSize: 10,
+          fontWeight: FontWeight.w600,
         ),
+      ),
+    );
+  }
+
+  Widget _buildInfoRowItem(IconData icon, String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12.0),
+      child: Row(
+        children: [
+          Icon(icon, size: 18, color: const Color(0xFF6C5CE7).withAlpha(150)),
+          const SizedBox(width: 12),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: TextStyle(color: Colors.grey.shade500, fontSize: 10),
+              ),
+              Text(
+                value,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -4838,9 +6029,7 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Confirm Delete'),
-        content: const Text(
-          'Are you sure you want to delete this classwork? This action cannot be undone.',
-        ),
+        content: const Text('Are you sure you want to delete this assignment?'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
@@ -4850,9 +6039,9 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
             onPressed: () {
               AppData().deleteAssignment(classId, assignmentId);
               Navigator.pop(ctx);
+              setState(() {});
             },
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Delete'),
+            child: const Text('Delete', style: TextStyle(color: Colors.red)),
           ),
         ],
       ),
@@ -4866,7 +6055,6 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
     String selectedYear = AppData().loggedYear ?? 'All';
     String selectedSem = AppData().loggedSemester ?? 'All';
     PlatformFile? pickedFile;
-    List<dynamic>? mcqData;
 
     showDialog(
       context: context,
@@ -4874,108 +6062,47 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
         return StatefulBuilder(
           builder: (ctx, setDialogState) {
             return AlertDialog(
-              title: const Text('Create Assignment'),
+              title: const Text('Create New Assignment'),
               content: SingleChildScrollView(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const SizedBox(height: 16),
                     TextField(
                       controller: titleCtrl,
                       decoration: const InputDecoration(
-                        labelText: 'Title',
-                        border: OutlineInputBorder(),
+                        labelText: 'Assignment Title',
                       ),
                     ),
                     const SizedBox(height: 16),
                     ListTile(
-                      shape: RoundedRectangleBorder(
-                        side: BorderSide(color: Colors.grey.shade400),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
                       title: Text(
                         'Start: ${startDateTime.toString().substring(0, 16)}',
                       ),
-                      trailing: const Icon(Icons.calendar_month),
+                      trailing: const Icon(Icons.calendar_today),
                       onTap: () async {
-                        DateTime? date = await showDatePicker(
+                        DateTime? d = await showDatePicker(
                           context: ctx,
                           initialDate: startDateTime,
-                          firstDate: DateTime.now().subtract(
-                            const Duration(days: 365),
-                          ),
+                          firstDate: DateTime.now(),
                           lastDate: DateTime(2030),
                         );
-                        if (date != null) {
-                          TimeOfDay? time = await showTimePicker(
-                            context: ctx,
-                            initialTime: TimeOfDay.fromDateTime(startDateTime),
-                          );
-                          if (time != null) {
-                            setDialogState(() {
-                              startDateTime = DateTime(
-                                date.year,
-                                date.month,
-                                date.day,
-                                time.hour,
-                                time.minute,
-                              );
-                            });
-                          }
-                        }
+                        if (d != null) setDialogState(() => startDateTime = d);
                       },
                     ),
-                    const SizedBox(height: 16),
                     ListTile(
-                      shape: RoundedRectangleBorder(
-                        side: BorderSide(color: Colors.grey.shade400),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
                       title: Text(
                         'End: ${endDateTime.toString().substring(0, 16)}',
                       ),
-                      trailing: const Icon(Icons.calendar_month),
+                      trailing: const Icon(Icons.calendar_today),
                       onTap: () async {
-                        DateTime? date = await showDatePicker(
+                        DateTime? d = await showDatePicker(
                           context: ctx,
                           initialDate: endDateTime,
                           firstDate: startDateTime,
                           lastDate: DateTime(2030),
                         );
-                        if (date != null) {
-                          TimeOfDay? time = await showTimePicker(
-                            context: ctx,
-                            initialTime: TimeOfDay.fromDateTime(endDateTime),
-                          );
-                          if (time != null) {
-                            setDialogState(() {
-                              endDateTime = DateTime(
-                                date.year,
-                                date.month,
-                                date.day,
-                                time.hour,
-                                time.minute,
-                              );
-                            });
-                          }
-                        }
+                        if (d != null) setDialogState(() => endDateTime = d);
                       },
-                    ),
-                    const SizedBox(height: 16),
-                    OutlinedButton.icon(
-                      onPressed: () async {
-                        var res = await FilePicker.platform.pickFiles();
-                        if (res != null) {
-                          setDialogState(() => pickedFile = res.files.first);
-                        }
-                      },
-                      icon: const Icon(Icons.attach_file),
-                      label: Text(
-                        pickedFile != null ? pickedFile!.name : 'Attach File',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
                     ),
                   ],
                 ),
@@ -4995,7 +6122,6 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                         year: selectedYear,
                         semester: selectedSem,
                         file: pickedFile,
-                        mcqData: mcqData,
                         startDateTime: startDateTime,
                         dueDateTime: endDateTime,
                       );
@@ -5003,10 +6129,6 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                       setState(() {});
                     }
                   },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF6C5CE7),
-                    foregroundColor: Colors.white,
-                  ),
                   child: const Text('Upload'),
                 ),
               ],
@@ -5024,11 +6146,13 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
 class AssignmentInteractionScreen extends StatefulWidget {
   final Map<String, dynamic> assignment;
   final Color classColor;
+  final Map<String, dynamic> classData;
 
   const AssignmentInteractionScreen({
     super.key,
     required this.assignment,
     required this.classColor,
+    required this.classData,
   });
 
   @override
@@ -5050,6 +6174,7 @@ class _AssignmentInteractionScreenState
   bool _isWarningDialogShown = false;
   bool _hasTabSwitchPending = false;
   bool _isMcqStartPressed = false;
+  bool _isTimeOverSplashVisible = false;
 
   List<dynamic> _shuffledMcqData = [];
 
@@ -5074,8 +6199,7 @@ class _AssignmentInteractionScreenState
             !(widget.assignment['isDone'] ?? false)) {
           DateTime? dueTime = widget.assignment['dueDateTime'];
           if (dueTime != null && DateTime.now().isAfter(dueTime)) {
-             _isNavigatingOut = true;
-             _submitMcq(); // Auto-saves any progress and redirects
+            _handleTimeEnd();
           }
         }
       }
@@ -5090,7 +6214,7 @@ class _AssignmentInteractionScreenState
       isTurnedIn = true;
       // submit automatically as missed or with current progress
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        _submitMcq(); // Correctly calculates score and redirects
+        _handleTimeEnd();
       });
     }
 
@@ -5200,7 +6324,19 @@ class _AssignmentInteractionScreenState
     );
   }
 
+  String _getOverallTimeLeft() {
+    DateTime? dueTime = widget.assignment['dueDateTime'];
+    if (dueTime == null) return "No Limit";
 
+    Duration diff = dueTime.difference(DateTime.now());
+    if (diff.isNegative) return "00:00:00";
+
+    String h = diff.inHours.toString().padLeft(2, '0');
+    String m = (diff.inMinutes % 60).toString().padLeft(2, '0');
+    String s = (diff.inSeconds % 60).toString().padLeft(2, '0');
+
+    return "$h:$m:$s";
+  }
 
   Widget _buildInstructionItem(IconData icon, String text, Color color) {
     return Padding(
@@ -5366,9 +6502,33 @@ class _AssignmentInteractionScreenState
       isFlagged: isFlagged,
     );
 
-    if (context.mounted) {
-      AppData().setPage(NavPage.dashboard);
-      Navigator.popUntil(context, (route) => route.isFirst);
+    // Instead of popping, we just let the UI rebuild to show results.
+    // If it was a manual finish, we can show a small message.
+    if (!isFlagged && mounted && !_isTimeOverSplashVisible) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Test Submitted Successfully!')),
+      );
+    }
+  }
+
+  void _handleTimeEnd() async {
+    if (_isNavigatingOut) return;
+    _isNavigatingOut = true;
+
+    if (mounted) {
+      setState(() {
+        _isTimeOverSplashVisible = true;
+      });
+    }
+
+    _submitMcq(); // Submit with current progress
+
+    await Future.delayed(const Duration(seconds: 3));
+
+    if (mounted) {
+      setState(() {
+        _isTimeOverSplashVisible = false;
+      });
     }
   }
 
@@ -5383,6 +6543,8 @@ class _AssignmentInteractionScreenState
 
   @override
   Widget build(BuildContext context) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isMobile = screenWidth < 800;
     bool isTeacher = AppData().currentUserRole == UserRole.teacher;
     bool isStudent = AppData().currentUserRole == UserRole.student;
     bool isTurnedIn = widget.assignment['isDone'] ?? false;
@@ -5398,301 +6560,389 @@ class _AssignmentInteractionScreenState
         appBar: (isStudent && !isTurnedIn && isMcq && _isMcqStartPressed)
             ? null // Full screen for quiz after start
             : AppBar(title: Text(isMcq ? 'MCQ Status' : 'Assignment Details')),
-        body: AnimatedBuilder(
-          animation: AppData(),
-          builder: (context, _) {
-            List<PlatformFile> attachedFiles =
-                AppData().assignmentSubmissions[widget.assignment['id']] ?? [];
-            bool isTurnedIn = widget.assignment['isDone'] ?? false;
+        body: Stack(
+          children: [
+            AnimatedBuilder(
+              animation: AppData(),
+              builder: (context, _) {
+                List<PlatformFile> attachedFiles =
+                    AppData().assignmentSubmissions[widget.assignment['id']] ??
+                    [];
+                bool isTurnedIn = widget.assignment['isDone'] ?? false;
 
-            DateTime? dueTime = widget.assignment['dueDateTime'];
-            bool isPastDue = dueTime != null && DateTime.now().isAfter(dueTime);
+                DateTime? dueTime = widget.assignment['dueDateTime'];
+                bool isPastDue =
+                    dueTime != null && DateTime.now().isAfter(dueTime);
 
-            if (AppData().currentUserRole == UserRole.student &&
-                !isTurnedIn &&
-                isPastDue) {
-              isTurnedIn = true;
-            }
+                if (AppData().currentUserRole == UserRole.student &&
+                    !isTurnedIn &&
+                    isPastDue) {
+                  isTurnedIn = true;
+                }
 
-            Widget heroBanner = Container(
-              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [
-                    widget.classColor.withAlpha(20),
-                    widget.classColor.withAlpha(5),
-                  ],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(color: widget.classColor.withAlpha(50)),
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(20),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(20),
-                      boxShadow: [
-                        BoxShadow(
-                          color: widget.classColor.withAlpha(20),
-                          blurRadius: 10,
-                          offset: const Offset(0, 4),
+                Widget heroBanner = LayoutBuilder(
+                  builder: (context, constraints) {
+                    bool isMobileBanner = constraints.maxWidth < 600;
+
+                    return Container(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: isMobileBanner ? 20 : 32,
+                        vertical: isMobileBanner ? 20 : 24,
+                      ),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [
+                            widget.classColor.withAlpha(20),
+                            widget.classColor.withAlpha(5),
+                          ],
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
                         ),
-                      ],
-                    ),
-                    child: Icon(
-                      widget.assignment['mcqData'] != null
-                          ? Icons.quiz_outlined
-                          : Icons.assignment_outlined,
-                      color: widget.classColor,
-                      size: 28,
-                    ),
-                  ),
-                  const SizedBox(width: 32),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          widget.assignment['title'],
-                          style: GoogleFonts.outfit(
-                            fontSize: 28,
-                            fontWeight: FontWeight.bold,
-                            color: const Color(0xFF1A1A2E),
-                          ),
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(
+                          color: widget.classColor.withAlpha(50),
                         ),
-                        const SizedBox(height: 12),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 8,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withAlpha(150),
-                            borderRadius: BorderRadius.circular(30),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.event_note_rounded,
-                                size: 16,
-                                color: widget.classColor,
-                              ),
-                              const SizedBox(width: 8),
-                              Text(
-                                (widget.assignment['startDateTime'] != null &&
-                                        widget.assignment['dueDateTime'] !=
-                                            null)
-                                    ? 'Window: ${widget.assignment['startDateTime'].toString().substring(0, 16)} to ${widget.assignment['dueDateTime'].toString().substring(0, 16)}'
-                                    : 'Due by ${widget.assignment['dueDate']}',
-                                style: TextStyle(
-                                  color: Colors.grey.shade800,
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 13,
+                      ),
+                      child: isMobileBanner
+                          ? Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.all(16),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white,
+                                    shape: BoxShape.circle,
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: widget.classColor.withAlpha(20),
+                                        blurRadius: 10,
+                                        offset: const Offset(0, 4),
+                                      ),
+                                    ],
+                                  ),
+                                  child: Icon(
+                                    widget.assignment['mcqData'] != null
+                                        ? Icons.quiz_outlined
+                                        : Icons.assignment_outlined,
+                                    color: widget.classColor,
+                                    size: 24,
+                                  ),
                                 ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
+                                const SizedBox(height: 16),
+                                Text(
+                                  widget.assignment['title'],
+                                  style: GoogleFonts.outfit(
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.bold,
+                                    color: const Color(0xFF1A1A2E),
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                _buildDateBadge(),
+                              ],
+                            )
+                          : Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.all(20),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white,
+                                    borderRadius: BorderRadius.circular(20),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: widget.classColor.withAlpha(20),
+                                        blurRadius: 10,
+                                        offset: const Offset(0, 4),
+                                      ),
+                                    ],
+                                  ),
+                                  child: Icon(
+                                    widget.assignment['mcqData'] != null
+                                        ? Icons.quiz_outlined
+                                        : Icons.assignment_outlined,
+                                    color: widget.classColor,
+                                    size: 28,
+                                  ),
+                                ),
+                                const SizedBox(width: 32),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        widget.assignment['title'],
+                                        style: GoogleFonts.outfit(
+                                          fontSize: 28,
+                                          fontWeight: FontWeight.bold,
+                                          color: const Color(0xFF1A1A2E),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 12),
+                                      _buildDateBadge(),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                    );
+                  },
+                );
+
+                if (isTeacher) {
+                  return FutureBuilder(
+                    future: AppData().fetchAssignmentStatusesForTeacher(
+                      widget.assignment['id'],
+                      isMcq: widget.assignment['mcqData'] != null,
                     ),
-                  ),
-                ],
-              ),
-            );
+                    builder: (context, snapshot) {
+                      double width = MediaQuery.of(context).size.width;
+                      double padding = width < 700 ? 16 : 40;
 
-            if (isTeacher) {
-              return FutureBuilder(
-                future: AppData().fetchAssignmentStatusesForTeacher(
-                  widget.assignment['id'],
-                  isMcq: widget.assignment['mcqData'] != null,
-                ),
-                builder: (context, snapshot) {
-                  return Padding(
-                    padding: const EdgeInsets.all(40.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        heroBanner,
-                        Expanded(
-                          child: SingleChildScrollView(
-                            physics: const BouncingScrollPhysics(),
-                            child: _buildTeacherReviewPanel(),
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              );
-            }
-
-            if (widget.assignment['mcqData'] != null) {
-              return _buildStudentMcqPanel(
-                _shuffledMcqData.isNotEmpty
-                    ? _shuffledMcqData
-                    : (widget.assignment['mcqData'] as List<dynamic>),
-                isTurnedIn,
-              );
-            }
-
-            return Padding(
-              padding: const EdgeInsets.all(40.0),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    flex: 3,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        heroBanner,
-                        if (widget.assignment['mcqData'] == null) ...[
-                          const SizedBox(height: 32),
-                          if (widget.assignment['instructorFileName'] !=
-                              null) ...[
-                            const Text(
-                              'Teacher\'s Posted File',
-                              style: TextStyle(
-                                fontSize: 20,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.black87,
+                      return Padding(
+                        padding: EdgeInsets.all(padding),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            heroBanner,
+                            const SizedBox(height: 32),
+                            Expanded(
+                              child: SingleChildScrollView(
+                                physics: const BouncingScrollPhysics(),
+                                child: _buildTeacherReviewPanel(),
                               ),
                             ),
-                            const SizedBox(height: 16),
-                            InkWell(
-                              onTap: () async {
-                                final assignmentId = widget.assignment['id'];
-                                final fName =
-                                    widget.assignment['instructorFileName'];
-                                final storagePath = '$assignmentId/$fName';
+                          ],
+                        ),
+                      );
+                    },
+                  );
+                }
 
-                                final String publicUrl = supabase.storage
-                                    .from('assignment-files')
-                                    .getPublicUrl(storagePath);
+                if (widget.assignment['mcqData'] != null) {
+                  return _buildStudentMcqPanel(
+                    _shuffledMcqData.isNotEmpty
+                        ? _shuffledMcqData
+                        : (widget.assignment['mcqData'] as List<dynamic>),
+                    isTurnedIn,
+                  );
+                }
 
-                                final Uri uri = Uri.parse(publicUrl);
-                                if (await canLaunchUrl(uri)) {
-                                  await launchUrl(
-                                    uri,
-                                    mode: LaunchMode.externalApplication,
-                                  );
-                                } else {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text('Could not open file URL'),
+                return SingleChildScrollView(
+                  child: Padding(
+                    padding: EdgeInsets.all(isMobile ? 16.0 : 40.0),
+                    child: Flex(
+                      direction: isMobile ? Axis.vertical : Axis.horizontal,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          flex: isMobile ? 0 : 3,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              heroBanner,
+                              if (widget.assignment['mcqData'] == null) ...[
+                                const SizedBox(height: 32),
+                                if (widget.assignment['instructorFileName'] !=
+                                    null) ...[
+                                  const Text(
+                                    'Teacher\'s Posted File',
+                                    style: TextStyle(
+                                      fontSize: 20,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.black87,
                                     ),
-                                  );
-                                }
-                              },
-                              borderRadius: BorderRadius.circular(16),
-                              child: Container(
-                                padding: const EdgeInsets.all(20),
-                                decoration: BoxDecoration(
-                                  color: Colors.white,
-                                  borderRadius: BorderRadius.circular(16),
-                                  border: Border.all(
-                                    color: Colors.grey.shade200,
                                   ),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: Colors.black.withAlpha(5),
-                                      blurRadius: 10,
-                                      offset: const Offset(0, 4),
-                                    ),
-                                  ],
-                                ),
-                                child: Row(
-                                  children: [
-                                    Container(
-                                      padding: const EdgeInsets.all(12),
-                                      decoration: BoxDecoration(
-                                        color: widget.classColor.withAlpha(20),
-                                        borderRadius: BorderRadius.circular(12),
-                                      ),
-                                      child: Icon(
-                                        Icons.description,
-                                        color: widget.classColor,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 16),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            widget
-                                                .assignment['instructorFileName'],
-                                            style: const TextStyle(
-                                              fontWeight: FontWeight.bold,
-                                              fontSize: 16,
+                                  const SizedBox(height: 16),
+                                  InkWell(
+                                    onTap: () async {
+                                      final assignmentId =
+                                          widget.assignment['id'];
+                                      final fName = widget
+                                          .assignment['instructorFileName'];
+                                      final storagePath =
+                                          '$assignmentId/$fName';
+
+                                      final String publicUrl = supabase.storage
+                                          .from('assignment-files')
+                                          .getPublicUrl(storagePath);
+
+                                      final Uri uri = Uri.parse(publicUrl);
+                                      if (await canLaunchUrl(uri)) {
+                                        await launchUrl(
+                                          uri,
+                                          mode: LaunchMode.externalApplication,
+                                        );
+                                      } else {
+                                        ScaffoldMessenger.of(
+                                          context,
+                                        ).showSnackBar(
+                                          const SnackBar(
+                                            content: Text(
+                                              'Could not open file URL',
                                             ),
                                           ),
-                                          const Text(
-                                            'Assignment Reference Material (Tap to View)',
-                                            style: TextStyle(
-                                              fontSize: 12,
-                                              color: Colors.grey,
+                                        );
+                                      }
+                                    },
+                                    borderRadius: BorderRadius.circular(16),
+                                    child: Container(
+                                      padding: const EdgeInsets.all(20),
+                                      decoration: BoxDecoration(
+                                        color: Colors.white,
+                                        borderRadius: BorderRadius.circular(16),
+                                        border: Border.all(
+                                          color: Colors.grey.shade200,
+                                        ),
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: Colors.black.withAlpha(5),
+                                            blurRadius: 10,
+                                            offset: const Offset(0, 4),
+                                          ),
+                                        ],
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          Container(
+                                            padding: const EdgeInsets.all(12),
+                                            decoration: BoxDecoration(
+                                              color: widget.classColor
+                                                  .withAlpha(20),
+                                              borderRadius:
+                                                  BorderRadius.circular(12),
+                                            ),
+                                            child: Icon(
+                                              Icons.description,
+                                              color: widget.classColor,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 16),
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                Text(
+                                                  widget
+                                                      .assignment['instructorFileName'],
+                                                  style: const TextStyle(
+                                                    fontWeight: FontWeight.bold,
+                                                    fontSize: 16,
+                                                  ),
+                                                ),
+                                                const Text(
+                                                  'Assignment Reference Material (Tap to View)',
+                                                  style: TextStyle(
+                                                    fontSize: 12,
+                                                    color: Colors.grey,
+                                                  ),
+                                                ),
+                                              ],
                                             ),
                                           ),
                                         ],
                                       ),
                                     ),
-                                  ],
+                                  ),
+                                  const SizedBox(height: 32),
+                                ],
+                                const Text(
+                                  'Instructions',
+                                  style: TextStyle(
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.black87,
+                                  ),
                                 ),
-                              ),
-                            ),
-                            const SizedBox(height: 32),
-                          ],
-                          const Text(
-                            'Instructions',
-                            style: TextStyle(
-                              fontSize: 20,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.black87,
-                            ),
+                                const SizedBox(height: 16),
+                                Container(
+                                  padding: const EdgeInsets.all(24),
+                                  decoration: BoxDecoration(
+                                    color: Colors.grey.shade50,
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(
+                                      color: Colors.grey.shade200,
+                                    ),
+                                  ),
+                                  child: Text(
+                                    'Please review the attached material and submit your workings.',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      color: Colors.grey.shade800,
+                                      height: 1.5,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ],
                           ),
-                          const SizedBox(height: 16),
-                          Container(
-                            padding: const EdgeInsets.all(24),
-                            decoration: BoxDecoration(
-                              color: Colors.grey.shade50,
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: Colors.grey.shade200),
-                            ),
-                            child: Text(
-                              'Please review the attached material and submit your workings.',
-                              style: TextStyle(
-                                fontSize: 16,
-                                color: Colors.grey.shade800,
-                                height: 1.5,
-                              ),
-                            ),
-                          ),
-                        ],
+                        ),
+                        if (isMobile)
+                          const SizedBox(height: 32)
+                        else
+                          const SizedBox(width: 40),
+                        Expanded(
+                          flex: isMobile ? 0 : 2,
+                          child: (isPastDue && attachedFiles.isEmpty)
+                              ? _buildSubmissionClosedPanel()
+                              : _buildStudentUploadPanel(
+                                  attachedFiles,
+                                  isTurnedIn,
+                                  isPastDue,
+                                ),
+                        ),
                       ],
                     ),
                   ),
-                  const SizedBox(width: 64),
-                  Expanded(
-                    flex: 2,
-                    child: (isPastDue && attachedFiles.isEmpty)
-                        ? _buildSubmissionClosedPanel()
-                        : _buildStudentUploadPanel(
-                            attachedFiles,
-                            isTurnedIn,
-                            isPastDue,
-                          ),
-                  ),
-                ],
+                );
+              },
+            ),
+            if (_isTimeOverSplashVisible) _buildTimeOverSplash(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTimeOverSplash() {
+    return Container(
+      color: Colors.white,
+      child: Center(
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(
+                Icons.timer_off_rounded,
+                size: 150,
+                color: Colors.orange,
               ),
-            );
-          },
+              const SizedBox(height: 48),
+              Text(
+                'Time Over!',
+                style: GoogleFonts.outfit(
+                  fontSize: 64,
+                  fontWeight: FontWeight.bold,
+                  color: const Color(0xFF1A1A2E),
+                ),
+              ),
+              const SizedBox(height: 24),
+              const Text(
+                'Submitting your responses...',
+                style: TextStyle(fontSize: 24, color: Colors.grey),
+              ),
+              const SizedBox(height: 64),
+              const SizedBox(
+                width: 80,
+                height: 80,
+                child: CircularProgressIndicator(
+                  color: Colors.orange,
+                  strokeWidth: 8,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -5703,8 +6953,9 @@ class _AssignmentInteractionScreenState
     bool isTurnedIn,
     bool isPastDue,
   ) {
+    final isMobile = MediaQuery.of(context).size.width < 800;
     return Container(
-      padding: const EdgeInsets.all(32),
+      padding: EdgeInsets.all(isMobile ? 16 : 32),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(24),
@@ -5944,6 +7195,37 @@ class _AssignmentInteractionScreenState
     );
   }
 
+  Widget _buildDateBadge() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(150),
+        borderRadius: BorderRadius.circular(30),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.event_note_rounded, size: 16, color: widget.classColor),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              (widget.assignment['startDateTime'] != null &&
+                      widget.assignment['dueDateTime'] != null)
+                  ? 'Window: ${widget.assignment['startDateTime'].toString().substring(0, 16)} to ${widget.assignment['dueDateTime'].toString().substring(0, 16)}'
+                  : 'Due by ${widget.assignment['dueDate']}',
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: Colors.grey.shade800,
+                fontWeight: FontWeight.w600,
+                fontSize: 12,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildSubmissionClosedPanel() {
     return Container(
       padding: const EdgeInsets.all(32),
@@ -5977,6 +7259,9 @@ class _AssignmentInteractionScreenState
   }
 
   Widget _buildStudentMcqPanel(List<dynamic> mcqData, bool isTurnedIn) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isMobile = screenWidth < 800;
+
     // Reload startTime fresh from assignment map every build
     final rawStart = widget.assignment['startDateTime'];
     DateTime? startTime;
@@ -5990,10 +7275,11 @@ class _AssignmentInteractionScreenState
         startTime != null &&
         DateTime.now().isBefore(startTime)) {
       return Center(
-        child: SizedBox(
-          width: 600,
+        child: SingleChildScrollView(
           child: Container(
-            padding: const EdgeInsets.all(40),
+            width: isMobile ? double.infinity : 600,
+            margin: EdgeInsets.all(isMobile ? 16 : 40),
+            padding: EdgeInsets.all(isMobile ? 24 : 40),
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 colors: [Colors.blue.shade50, Colors.white],
@@ -6007,12 +7293,17 @@ class _AssignmentInteractionScreenState
               mainAxisSize: MainAxisSize.min,
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const Icon(Icons.lock_clock, size: 80, color: Colors.blue),
-                const SizedBox(height: 32),
-                const Text(
+                Icon(
+                  Icons.lock_clock,
+                  size: isMobile ? 60 : 80,
+                  color: Colors.blue,
+                ),
+                SizedBox(height: isMobile ? 24 : 32),
+                Text(
                   'Test Has Not Started Yet',
+                  textAlign: TextAlign.center,
                   style: TextStyle(
-                    fontSize: 28,
+                    fontSize: isMobile ? 22 : 28,
                     fontWeight: FontWeight.bold,
                     color: Colors.black87,
                   ),
@@ -6022,7 +7313,7 @@ class _AssignmentInteractionScreenState
                   'This test starts at ${_formatDateTime12h(startTime)}.\nPlease return when the timer begins.',
                   textAlign: TextAlign.center,
                   style: TextStyle(
-                    fontSize: 16,
+                    fontSize: isMobile ? 14 : 16,
                     color: Colors.grey.shade700,
                     height: 1.5,
                   ),
@@ -6039,92 +7330,101 @@ class _AssignmentInteractionScreenState
       bool isTimedOut = dueTime != null && DateTime.now().isAfter(dueTime);
       bool isFlagged = AppData().mcqFlagged[widget.assignment['id']] ?? false;
 
-      return Center(
-        child: SizedBox(
-          width: 600,
-          child: Container(
-            padding: const EdgeInsets.all(40),
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [
-                  (isFlagged || isTimedOut)
-                      ? Colors.red.shade50
-                      : Colors.green.shade50,
-                  Colors.white,
-                ],
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-              ),
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(
-                color: (isFlagged || isTimedOut)
-                    ? Colors.red.shade200
-                    : Colors.green.shade200,
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: (isFlagged || isTimedOut ? Colors.red : Colors.green)
-                      .withAlpha(20),
-                  blurRadius: 24,
-                  offset: const Offset(0, 8),
-                ),
-              ],
-            ),
+      String title = 'Test Over';
+      String subtitle = 'Your responses have been recorded.';
+      IconData icon = Icons.check_circle_rounded;
+      Color mainColor = Colors.green;
+
+      if (isFlagged) {
+        title = 'Test Terminated';
+        subtitle =
+            'Security violation detected. Your session was ended and flagged.';
+        icon = Icons.report_problem_rounded;
+        mainColor = Colors.red;
+      } else if (isTimedOut) {
+        title = 'Time Ended';
+        subtitle =
+            'The test window has closed. Your progress so far was submitted.';
+        icon = Icons.timer_off_rounded;
+        mainColor = Colors.orange;
+      }
+
+      return Container(
+        padding: EdgeInsets.symmetric(horizontal: isMobile ? 16 : 24),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [mainColor.withAlpha(10), Colors.white],
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+          ),
+        ),
+        child: Center(
+          child: SingleChildScrollView(
             child: Column(
-              mainAxisSize: MainAxisSize.min,
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Container(
-                  padding: const EdgeInsets.all(24),
+                  padding: EdgeInsets.all(isMobile ? 24 : 32),
                   decoration: BoxDecoration(
                     color: Colors.white,
                     shape: BoxShape.circle,
                     boxShadow: [
                       BoxShadow(
-                        color:
-                            (isFlagged || isTimedOut
-                                    ? Colors.red
-                                    : Colors.green)
-                                .withAlpha(30),
-                        blurRadius: 20,
+                        color: mainColor.withAlpha(30),
+                        blurRadius: 30,
+                        spreadRadius: 5,
                       ),
                     ],
                   ),
                   child: Icon(
-                    isFlagged
-                        ? Icons.report_problem
-                        : (isTimedOut ? Icons.timer_off : Icons.check_circle),
-                    size: 80,
-                    color: (isFlagged || isTimedOut)
-                        ? Colors.red
-                        : Colors.green,
+                    icon,
+                    size: isMobile ? 60 : 100,
+                    color: mainColor,
                   ),
                 ),
-                const SizedBox(height: 32),
+                SizedBox(height: isMobile ? 32 : 48),
                 Text(
-                  isFlagged
-                      ? 'Test Terminated!'
-                      : (isTimedOut
-                            ? 'Test is Over!'
-                            : 'Quiz Completed or Finished!'),
-                  style: const TextStyle(
-                    fontSize: 28,
+                  title,
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.outfit(
+                    fontSize: isMobile ? 32 : 42,
                     fontWeight: FontWeight.bold,
-                    color: Colors.black87,
+                    color: const Color(0xFF1A1A2E),
                   ),
                 ),
                 const SizedBox(height: 16),
-                Text(
-                  isFlagged
-                      ? 'This test was automatically terminated due to a security violation (tab switching or navigation).\nThis attempt has been flagged and submitted to your instructor.'
-                      : (isTimedOut
-                            ? 'The deadline for this test has passed.\nYour progress was automatically saved and shared with your instructor.'
-                            : 'Your final answers were securely submitted to your instructor.\nYour score will be strictly visible to your teacher only.'),
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 16,
-                    color: Colors.grey.shade700,
-                    height: 1.5,
+                SizedBox(
+                  width: 500,
+                  child: Text(
+                    subtitle,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: isMobile ? 16 : 18,
+                      color: Colors.grey.shade600,
+                      height: 1.5,
+                    ),
+                  ),
+                ),
+                SizedBox(height: isMobile ? 48 : 64),
+                ElevatedButton.icon(
+                  onPressed: () {
+                    AppData().setPage(NavPage.dashboard);
+                    Navigator.popUntil(context, (route) => route.isFirst);
+                  },
+                  icon: const Icon(Icons.dashboard_rounded),
+                  label: const Text('Back to Dashboard'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: mainColor,
+                    foregroundColor: Colors.white,
+                    padding: EdgeInsets.symmetric(
+                      horizontal: isMobile ? 24 : 40,
+                      vertical: isMobile ? 16 : 20,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    elevation: 5,
+                    shadowColor: mainColor.withAlpha(100),
                   ),
                 ),
               ],
@@ -6305,127 +7605,95 @@ class _AssignmentInteractionScreenState
             children: [
               // Top Navigation Header
               Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 40,
-                  vertical: 24,
+                padding: EdgeInsets.symmetric(
+                  horizontal: isMobile ? 16 : 40,
+                  vertical: isMobile ? 16 : 24,
                 ),
                 decoration: BoxDecoration(
                   border: Border(
                     bottom: BorderSide(color: Colors.grey.shade200),
                   ),
                 ),
-                child: Row(
+                child: Flex(
+                  direction: isMobile ? Axis.vertical : Axis.horizontal,
+                  crossAxisAlignment: isMobile
+                      ? CrossAxisAlignment.start
+                      : CrossAxisAlignment.center,
                   children: [
-                    SizedBox(
-                      width: 250,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            widget.assignment['title'],
-                            style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 20,
-                              color: Color(0xFF4A4A68),
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          widget.assignment['title'],
+                          style: GoogleFonts.outfit(
+                            fontWeight: FontWeight.bold,
+                            fontSize: isMobile ? 18 : 20,
+                            color: const Color(0xFF4A4A68),
                           ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Session 1',
-                            style: TextStyle(
-                              color: Colors.grey.shade500,
-                              fontWeight: FontWeight.w600,
-                            ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Test In Progress',
+                          style: TextStyle(
+                            color: Colors.grey.shade500,
+                            fontWeight: FontWeight.w600,
+                            fontSize: isMobile ? 12 : 14,
                           ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
-                    Expanded(
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 40),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    '${(progress * 100).toInt()}%',
-                                    style: TextStyle(
-                                      color: widget.classColor,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  LinearProgressIndicator(
-                                    value: progress,
-                                    backgroundColor: widget.classColor
-                                        .withAlpha(20),
-                                    valueColor: AlwaysStoppedAnimation<Color>(
-                                      widget.classColor,
-                                    ),
-                                    minHeight: 8,
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(width: 24),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 16,
-                                vertical: 8,
-                              ),
-                              decoration: BoxDecoration(
-                                color: widget.classColor.withAlpha(120),
-                                borderRadius: BorderRadius.circular(20),
-                              ),
-                              child: const Text(
-                                'review',
+                    if (isMobile)
+                      const SizedBox(height: 20)
+                    else
+                      const Spacer(),
+                    if (!isMobile)
+                      Expanded(
+                        flex: 2,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 40),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '${(progress * 100).toInt()}% Completed',
                                 style: TextStyle(
-                                  color: Colors.white,
+                                  color: widget.classColor,
                                   fontWeight: FontWeight.bold,
                                   fontSize: 12,
                                 ),
                               ),
-                            ),
-                            const SizedBox(width: 12),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 16,
-                                vertical: 8,
-                              ),
-                              decoration: BoxDecoration(
-                                border: Border.all(color: Colors.grey.shade300),
-                                borderRadius: BorderRadius.circular(20),
-                              ),
-                              child: Text(
-                                'Mark as review',
-                                style: TextStyle(
-                                  color: Colors.grey.shade600,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 12,
+                              const SizedBox(height: 8),
+                              LinearProgressIndicator(
+                                value: progress,
+                                backgroundColor: widget.classColor.withAlpha(
+                                  20,
                                 ),
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  widget.classColor,
+                                ),
+                                minHeight: 8,
+                                borderRadius: BorderRadius.circular(4),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
-                    ),
-                    if (_mcqTimeLeft >= 0)
-                      SizedBox(
-                        width: 150,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
+                    Wrap(
+                      spacing: 20,
+                      runSpacing: 12,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
                             Icon(
-                              Icons.access_time_filled,
+                              Icons.timer_outlined,
                               color: widget.classColor.withAlpha(180),
-                              size: 28,
+                              size: 22,
                             ),
-                            const SizedBox(width: 12),
+                            const SizedBox(width: 8),
                             Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
@@ -6434,31 +7702,79 @@ class _AssignmentInteractionScreenState
                                   style: const TextStyle(
                                     fontWeight: FontWeight.bold,
                                     color: Color(0xFF4A4A68),
-                                    fontSize: 16,
+                                    fontSize: 13,
                                   ),
                                 ),
                                 Text(
-                                  'Time Left',
+                                  'Question',
                                   style: TextStyle(
                                     color: Colors.grey.shade400,
-                                    fontSize: 12,
+                                    fontSize: 10,
                                   ),
                                 ),
                               ],
                             ),
                           ],
                         ),
-                      ),
+                        Container(
+                          width: 1,
+                          height: 24,
+                          color: Colors.grey.shade200,
+                        ),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.access_time_filled,
+                              color: widget.classColor.withAlpha(180),
+                              size: 22,
+                            ),
+                            const SizedBox(width: 8),
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  _getOverallTimeLeft(),
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    color:
+                                        (widget.assignment['dueDateTime'] !=
+                                                null &&
+                                            widget.assignment['dueDateTime']
+                                                    .difference(DateTime.now())
+                                                    .inMinutes <
+                                                5)
+                                        ? Colors.red
+                                        : const Color(0xFF4A4A68),
+                                    fontSize: 13,
+                                  ),
+                                ),
+                                Text(
+                                  'Test Ends In',
+                                  style: TextStyle(
+                                    color: Colors.grey.shade400,
+                                    fontSize: 10,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
                   ],
                 ),
               ),
 
               Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
+                child: SingleChildScrollView(
+                  padding: EdgeInsets.symmetric(
+                    vertical: isMobile ? 24 : 16,
+                    horizontal: isMobile ? 16 : 0,
+                  ),
                   child: Center(
                     child: SizedBox(
-                      width: 800,
+                      width: isMobile ? double.infinity : 800,
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -6467,21 +7783,21 @@ class _AssignmentInteractionScreenState
                             'Question ${currentMcqIndex + 1}',
                             style: TextStyle(
                               fontWeight: FontWeight.bold,
-                              fontSize: 18,
+                              fontSize: isMobile ? 16 : 18,
                               color: Colors.grey.shade500,
                             ),
                           ),
                           const SizedBox(height: 12),
                           Text(
                             q['question'],
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontWeight: FontWeight.bold,
-                              fontSize: 24,
+                              fontSize: isMobile ? 20 : 24,
                               height: 1.5,
-                              color: Color(0xFF4A4A68),
+                              color: const Color(0xFF4A4A68),
                             ),
                           ),
-                          const SizedBox(height: 24),
+                          const SizedBox(height: 32),
                           ...List.generate((q['options'] as List).length, (
                             optIndex,
                           ) {
@@ -6500,9 +7816,9 @@ class _AssignmentInteractionScreenState
                                 },
                                 borderRadius: BorderRadius.circular(16),
                                 child: Container(
-                                  padding: const EdgeInsets.symmetric(
+                                  padding: EdgeInsets.symmetric(
                                     horizontal: 24,
-                                    vertical: 20,
+                                    vertical: isMobile ? 16 : 20,
                                   ),
                                   decoration: BoxDecoration(
                                     color: isSelected
@@ -6534,7 +7850,7 @@ class _AssignmentInteractionScreenState
                                         child: Text(
                                           displayOptionText,
                                           style: TextStyle(
-                                            fontSize: 18,
+                                            fontSize: isMobile ? 16 : 18,
                                             fontWeight: isSelected
                                                 ? FontWeight.bold
                                                 : FontWeight.w500,
@@ -6581,92 +7897,99 @@ class _AssignmentInteractionScreenState
                   ),
                 ),
               ),
-
               Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 40,
-                  vertical: 32,
+                padding: EdgeInsets.symmetric(
+                  horizontal: isMobile ? 16 : 40,
+                  vertical: isMobile ? 24 : 32,
                 ),
                 decoration: BoxDecoration(
                   color: Colors.white,
                   border: Border(top: BorderSide(color: Colors.grey.shade200)),
                 ),
-                child: Row(
+                child: Flex(
+                  direction: isMobile ? Axis.vertical : Axis.horizontal,
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     // Info text about auto-submit at the end
-                    if (currentMcqIndex == mcqData.length - 1 && _mcqTimeLeft >= 0)
-                      Text(
-                        'Auto-submitting in $_mcqTimeLeft s...',
-                        style: TextStyle(
-                          color: Colors.grey.shade600,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16,
+                    if (currentMcqIndex == mcqData.length - 1 &&
+                        _mcqTimeLeft >= 0)
+                      Padding(
+                        padding: EdgeInsets.only(bottom: isMobile ? 20 : 0),
+                        child: Text(
+                          'Auto-submitting in $_mcqTimeLeft s...',
+                          style: TextStyle(
+                            color: Colors.grey.shade600,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
                         ),
                       )
-                    else
+                    else if (!isMobile)
                       const SizedBox(),
 
                     // Control Buttons
                     Row(
-                      mainAxisSize: MainAxisSize.min,
+                      mainAxisAlignment: isMobile
+                          ? MainAxisAlignment.spaceBetween
+                          : MainAxisAlignment.end,
                       children: [
                         // Skip Button
-                        OutlinedButton.icon(
-                          onPressed: () {
-                            setState(() {
-                              mcqAnswers.remove(currentMcqIndex);
-                            });
-                            _moveToNextQuestionOrSubmit();
-                          },
-                          icon: const Icon(
-                            Icons.keyboard_double_arrow_right,
-                            color: Colors.orange,
-                          ),
-                          label: const Text(
-                            'Skip Question',
-                            style: TextStyle(
-                              color: Colors.orange,
-                              fontWeight: FontWeight.bold,
+                        Expanded(
+                          flex: isMobile ? 1 : 0,
+                          child: OutlinedButton(
+                            onPressed: () {
+                              setState(() {
+                                mcqAnswers.remove(currentMcqIndex);
+                              });
+                              _moveToNextQuestionOrSubmit();
+                            },
+                            style: OutlinedButton.styleFrom(
+                              padding: EdgeInsets.symmetric(
+                                horizontal: isMobile ? 12 : 24,
+                                vertical: isMobile ? 16 : 20,
+                              ),
+                              side: const BorderSide(color: Colors.orange),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
                             ),
-                          ),
-                          style: OutlinedButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 24,
-                              vertical: 20,
-                            ),
-                            side: const BorderSide(color: Colors.orange),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
+                            child: const Text(
+                              'Skip',
+                              style: TextStyle(
+                                color: Colors.orange,
+                                fontWeight: FontWeight.bold,
+                              ),
                             ),
                           ),
                         ),
                         const SizedBox(width: 16),
-                        ElevatedButton.icon(
-                          onPressed: () {
-                            _moveToNextQuestionOrSubmit();
-                          },
-                          icon: Icon(
-                            currentMcqIndex == mcqData.length - 1
-                                ? Icons.check_circle_rounded
-                                : Icons.arrow_forward_rounded,
-                          ),
-                          label: Text(
-                            currentMcqIndex == mcqData.length - 1
-                                ? 'Finish Test & Submit'
-                                : 'Next Question',
-                          ),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: widget.classColor,
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 40,
-                              vertical: 20,
+                        Expanded(
+                          flex: isMobile ? 2 : 0,
+                          child: ElevatedButton(
+                            onPressed: () {
+                              _moveToNextQuestionOrSubmit();
+                            },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: widget.classColor,
+                              foregroundColor: Colors.white,
+                              padding: EdgeInsets.symmetric(
+                                horizontal: isMobile ? 20 : 40,
+                                vertical: isMobile ? 16 : 20,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              elevation: 0,
                             ),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
+                            child: Text(
+                              currentMcqIndex == mcqData.length - 1
+                                  ? 'Finish & Submit'
+                                  : 'Next Question',
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                              ),
                             ),
-                            elevation: 0,
                           ),
                         ),
                       ],
@@ -6677,8 +8000,6 @@ class _AssignmentInteractionScreenState
             ],
           ),
         ),
-
-
       ],
     );
   }
@@ -6695,118 +8016,189 @@ class _AssignmentInteractionScreenState
       if (status['is_flagged'] == true) flaggedCount++;
     }
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    final deptStudents = AppData().registeredStudents.where(
+      (s) => s['department'] == widget.classData['title'],
+    ).toList();
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        bool isMobile = constraints.maxWidth < 700;
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (isMobile)
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    isMcq ? 'Live Results Dashboard' : 'Submissions Review',
+                    style: GoogleFonts.outfit(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                      color: const Color(0xFF2D3436),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  if (isMcq)
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: () => _showAllResultsSummaryDialog(context),
+                        icon: const Icon(Icons.download_rounded),
+                        label: const Text('Download All Details'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF6C5CE7),
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              )
+            else
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    isMcq ? 'Live Results Dashboard' : 'Submissions Review',
+                    style: GoogleFonts.outfit(
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
+                      color: const Color(0xFF2D3436),
+                    ),
+                  ),
+                  if (isMcq)
+                    ElevatedButton.icon(
+                      onPressed: () => _showAllResultsSummaryDialog(context),
+                      icon: const Icon(Icons.download_rounded),
+                      label: const Text('Download All Details'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF6C5CE7),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 12,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            const SizedBox(height: 24),
+            if (isMobile)
+              Column(
+                children: [
+                  _buildModernStatCard(
+                    'Turned In',
+                    turnedInCount.toString(),
+                    Icons.check_circle,
+                    Colors.green,
+                  ),
+                  const SizedBox(height: 12),
+                  _buildModernStatCard(
+                    'Assigned',
+                    deptStudents.length.toString(),
+                    Icons.people,
+                    Colors.blue,
+                  ),
+                  if (isMcq) ...[
+                    const SizedBox(height: 12),
+                    _buildModernStatCard(
+                      'Flagged',
+                      flaggedCount.toString(),
+                      Icons.report_problem,
+                      Colors.red,
+                    ),
+                  ],
+                ],
+              )
+            else
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildModernStatCard(
+                      'Turned In',
+                      turnedInCount.toString(),
+                      Icons.check_circle,
+                      Colors.green,
+                    ),
+                  ),
+                  const SizedBox(width: 20),
+                  Expanded(
+                    child: _buildModernStatCard(
+                      'Assigned',
+                      deptStudents.length.toString(),
+                      Icons.people,
+                      Colors.blue,
+                    ),
+                  ),
+                  if (isMcq) ...[
+                    const SizedBox(width: 20),
+                    Expanded(
+                      child: _buildModernStatCard(
+                        'Flagged',
+                        flaggedCount.toString(),
+                        Icons.report_problem,
+                        Colors.red,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            const SizedBox(height: 32),
             Text(
-              isMcq ? 'Live Results Dashboard' : 'Submissions Review',
+              'Student Details',
               style: GoogleFonts.outfit(
-                fontSize: 24,
                 fontWeight: FontWeight.bold,
-                color: const Color(0xFF2D3436),
+                fontSize: 18,
+                color: Colors.black87,
               ),
             ),
-            if (isMcq)
-              ElevatedButton.icon(
-                onPressed: () => _showAllResultsSummaryDialog(context),
-                icon: const Icon(Icons.download_rounded),
-                label: const Text('Download All Details'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF6C5CE7),
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 20,
-                    vertical: 12,
-                  ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
+            const SizedBox(height: 16),
+            if (deptStudents.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 20),
+                child: Center(
+                  child: Text(
+                    'No students found in this department',
+                    style: TextStyle(color: Colors.grey),
                   ),
                 ),
-              ),
-          ],
-        ),
-        const SizedBox(height: 24),
-        Row(
-          children: [
-            Expanded(
-              child: _buildModernStatCard(
-                'Turned In',
-                turnedInCount.toString(),
-                Icons.check_circle,
-                Colors.green,
-              ),
-            ),
-            const SizedBox(width: 20),
-            Expanded(
-              child: _buildModernStatCard(
-                'Assigned',
-                AppData().registeredStudents.length.toString(),
-                Icons.people,
-                Colors.blue,
-              ),
-            ),
-            if (isMcq) ...[
-              const SizedBox(width: 20),
-              Expanded(
-                child: _buildModernStatCard(
-                  'Flagged',
-                  flaggedCount.toString(),
-                  Icons.report_problem,
-                  Colors.red,
-                ),
-              ),
-            ],
-          ],
-        ),
-        const SizedBox(height: 32),
-        Text(
-          'Student Details',
-          style: GoogleFonts.outfit(
-            fontWeight: FontWeight.bold,
-            fontSize: 18,
-            color: Colors.black87,
-          ),
-        ),
-        const SizedBox(height: 16),
-        if (AppData().registeredStudents.isEmpty)
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 20),
-            child: Center(
-              child: Text(
-                'No students found',
-                style: TextStyle(color: Colors.grey),
-              ),
-            ),
-          )
-        else
-          ...AppData().registeredStudents.map((student) {
-            String name = student['name'] ?? 'Unknown Student';
-            // Try all possible student ID fields and normalize to string
-            String? eNo = student['enrollno']?.toString();
-            String? eNoAlt = student['Enrollment No']?.toString();
-            String stdId = (eNo != null && eNo.isNotEmpty)
-                ? eNo
-                : (eNoAlt ?? '');
+              )
+            else
+              ...deptStudents.map((student) {
+                String name = student['name'] ?? 'Unknown Student';
+                // Try all possible student ID fields and normalize to string
+                String? eNo = student['enrollno']?.toString();
+                String? eNoAlt = student['Enrollment No']?.toString();
+                String stdId = (eNo != null && eNo.isNotEmpty)
+                    ? eNo
+                    : (eNoAlt ?? '');
 
-            final status = AppData().currentAssignmentStatuses[stdId];
-            bool hasSubmitted = status?['is_done'] ?? false;
-            int? studentScore = status?['mcq_score'];
-            bool isStudentFlagged = status?['is_flagged'] ?? false;
+                final status = AppData().currentAssignmentStatuses[stdId];
+                bool hasSubmitted = status?['is_done'] ?? false;
+                int? studentScore = status?['mcq_score'];
+                bool isStudentFlagged = status?['is_flagged'] ?? false;
 
-            return _buildStudentRosterItem(
-              name,
-              stdId,
-              hasSubmitted,
-              isMcq,
-              studentScore,
-              isFlagged: isStudentFlagged,
-            );
-          }),
-        const SizedBox(height: 100), // Visual padding at bottom
-      ],
+                return _buildStudentRosterItem(
+                  name,
+                  stdId,
+                  hasSubmitted,
+                  isMcq,
+                  studentScore,
+                  isFlagged: isStudentFlagged,
+                );
+              }),
+            const SizedBox(height: 100), // Visual padding at bottom
+          ],
+        );
+      },
     );
   }
 
@@ -6850,25 +8242,33 @@ class _AssignmentInteractionScreenState
         ),
         subtitle: Padding(
           padding: const EdgeInsets.only(top: 4.0),
-          child: Row(
+          child: Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              Icon(
-                hasSubmitted ? Icons.check_circle : Icons.error_outline,
-                size: 14,
-                color: hasSubmitted ? Colors.green : Colors.red,
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    hasSubmitted ? Icons.check_circle : Icons.error_outline,
+                    size: 14,
+                    color: hasSubmitted ? Colors.green : Colors.red,
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    hasSubmitted ? 'Turned in' : 'Not Attended',
+                    style: TextStyle(
+                      color: hasSubmitted
+                          ? Colors.green.shade700
+                          : Colors.red.shade700,
+                      fontWeight: FontWeight.w500,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(width: 4),
-              Text(
-                hasSubmitted ? 'Turned in' : 'Not Attended',
-                style: TextStyle(
-                  color: hasSubmitted
-                      ? Colors.green.shade700
-                      : Colors.red.shade700,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              if (isFlagged) ...[
-                const SizedBox(width: 12),
+              if (isFlagged)
                 Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 8,
@@ -6895,47 +8295,49 @@ class _AssignmentInteractionScreenState
                     ],
                   ),
                 ),
-                if (DateTime.now().isBefore(
-                  widget.assignment['dueDateTime'] ??
-                      DateTime.now().add(const Duration(days: 1)),
-                ))
-                  Padding(
-                    padding: const EdgeInsets.only(left: 12),
-                    child: TextButton.icon(
-                      onPressed: () {
-                        AppData().unTerminateMcq(widget.assignment['id']);
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text(
-                              'Student attempt restored. Student can now retry the quiz.',
-                            ),
-                            backgroundColor: Colors.green,
+              if (isFlagged &&
+                  DateTime.now().isBefore(
+                    widget.assignment['dueDateTime'] ??
+                        DateTime.now().add(const Duration(days: 1)),
+                  ))
+                TextButton.icon(
+                  onPressed: () async {
+                    await AppData().allowStudentReattempt(
+                      widget.assignment['id'],
+                      stdId,
+                    );
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            'Student attempt restored. Student can now retry the quiz.',
                           ),
-                        );
-                      },
-                      icon: const Icon(
-                        Icons.refresh_rounded,
-                        size: 14,
-                        color: Colors.blue,
-                      ),
-                      label: const Text(
-                        'Allow Re-attempt',
-                        style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.blue,
+                          backgroundColor: Colors.green,
                         ),
-                      ),
-                      style: TextButton.styleFrom(
-                        backgroundColor: Colors.blue.shade50,
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                      ),
+                      );
+                    }
+                  },
+                  icon: const Icon(
+                    Icons.refresh_rounded,
+                    size: 14,
+                    color: Colors.blue,
+                  ),
+                  label: const Text(
+                    'Allow Re-attempt',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.blue,
                     ),
                   ),
-              ],
+                  style: TextButton.styleFrom(
+                    backgroundColor: Colors.blue.shade50,
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                ),
             ],
           ),
         ),
@@ -7281,175 +8683,192 @@ class _AssignmentInteractionScreenState
   }
 
   void _showAllResultsSummaryDialog(BuildContext context) {
-    final allStudents = AppData().registeredStudents;
+    final allStudents = AppData()
+        .registeredStudents
+        .where((s) => s['department'] == widget.classData['title'])
+        .toList();
     final statuses = AppData().currentAssignmentStatuses;
-    final originalMcqData = (widget.assignment['mcqData'] as List<dynamic>?) ?? [];
+    final originalMcqData =
+        (widget.assignment['mcqData'] as List<dynamic>?) ?? [];
 
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('All Students MCQ Summary'),
         content: SizedBox(
-          width: 800,
-          height: 600,
+          width: MediaQuery.of(context).size.width * 0.9,
+          height: MediaQuery.of(context).size.height * 0.8,
           child: SingleChildScrollView(
-            child: DataTable(
-              horizontalMargin: 12,
-              columnSpacing: 16,
-              columns: const [
-                DataColumn(
-                  label: Text(
-                    'Student',
-                    style: TextStyle(fontWeight: FontWeight.bold),
+            scrollDirection: Axis.vertical,
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: DataTable(
+                horizontalMargin: 8,
+                columnSpacing: 12,
+                columns: const [
+                  DataColumn(
+                    label: Text(
+                      'Student',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
                   ),
-                ),
-                DataColumn(
-                  label: Text(
-                    'Status',
-                    style: TextStyle(fontWeight: FontWeight.bold),
+                  DataColumn(
+                    label: Text(
+                      'Status',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
                   ),
-                ),
-                DataColumn(
-                  label: Text(
-                    'Ans',
-                    style: TextStyle(fontWeight: FontWeight.bold),
+                  DataColumn(
+                    label: Text(
+                      'Ans',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
                   ),
-                ),
-                DataColumn(
-                  label: Text(
-                    'Skip',
-                    style: TextStyle(fontWeight: FontWeight.bold),
+                  DataColumn(
+                    label: Text(
+                      'Skip',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
                   ),
-                ),
-                DataColumn(
-                  label: Text(
-                    'Score',
-                    style: TextStyle(fontWeight: FontWeight.bold),
+                  DataColumn(
+                    label: Text(
+                      'Score',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
                   ),
-                ),
-                DataColumn(
-                  label: Text(
-                    'Flagged',
-                    style: TextStyle(fontWeight: FontWeight.bold),
+                  DataColumn(
+                    label: Text(
+                      'Flagged',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
                   ),
-                ),
-                DataColumn(
-                  label: Text(
-                    'Details',
-                    style: TextStyle(fontWeight: FontWeight.bold),
+                  DataColumn(
+                    label: Text(
+                      'Details',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
                   ),
-                ),
-              ],
-              rows: allStudents.map((student) {
-                String name = student['name'] ?? 'Unknown';
-                String? eNo = student['enrollno']?.toString();
-                String? eNoAlt = student['Enrollment No']?.toString();
-                String stdId = (eNo != null && eNo.isNotEmpty)
-                    ? eNo
-                    : (eNoAlt ?? '');
+                ],
+                rows: allStudents.map((student) {
+                  String name = student['name'] ?? 'Unknown';
+                  String? eNo = student['enrollno']?.toString();
+                  String? eNoAlt = student['Enrollment No']?.toString();
+                  String stdId = (eNo != null && eNo.isNotEmpty)
+                      ? eNo
+                      : (eNoAlt ?? '');
 
-                final status = statuses[stdId];
-                bool hasSubmitted = status?['is_done'] ?? false;
-                int? score = status?['mcq_score'];
-                bool isFlagged = status?['is_flagged'] ?? false;
+                  final status = statuses[stdId];
+                  bool hasSubmitted = status?['is_done'] ?? false;
+                  int? score = status?['mcq_score'];
+                  bool isFlagged = status?['is_flagged'] ?? false;
 
-                final dynamic rawAnswers = status?['answers'];
-                int answeredCount = 0;
-                int presentedCount = (widget.assignment['questionsToShow'] as int?) ?? originalMcqData.length;
-                if (presentedCount > originalMcqData.length) presentedCount = originalMcqData.length;
+                  final dynamic rawAnswers = status?['answers'];
+                  int answeredCount = 0;
+                  int presentedCount =
+                      (widget.assignment['questionsToShow'] as int?) ??
+                      originalMcqData.length;
+                  if (presentedCount > originalMcqData.length)
+                    presentedCount = originalMcqData.length;
 
-                if (rawAnswers is Map) {
-                  if (rawAnswers.containsKey('responses')) {
-                    // Modern format: has 'questions' and 'responses' keys
-                    answeredCount = (rawAnswers['responses'] as Map).length;
-                    presentedCount = (rawAnswers['questions'] as List?)?.length ?? presentedCount;
-                  } else {
-                    // Legacy/Alternative format: Direct index-to-answer map
-                    answeredCount = rawAnswers.length;
+                  if (rawAnswers is Map) {
+                    if (rawAnswers.containsKey('responses')) {
+                      // Modern format: has 'questions' and 'responses' keys
+                      answeredCount = (rawAnswers['responses'] as Map).length;
+                      presentedCount =
+                          (rawAnswers['questions'] as List?)?.length ??
+                          presentedCount;
+                    } else {
+                      // Legacy/Alternative format: Direct index-to-answer map
+                      answeredCount = rawAnswers.length;
+                    }
                   }
-                }
 
-                int skippedCount = hasSubmitted
-                    ? (presentedCount - answeredCount)
-                    : 0;
-                if (skippedCount < 0) skippedCount = 0;
+                  int skippedCount = hasSubmitted
+                      ? (presentedCount - answeredCount)
+                      : 0;
+                  if (skippedCount < 0) skippedCount = 0;
 
-                return DataRow(
-                  cells: [
-                    DataCell(Text(name, style: const TextStyle(fontSize: 12))),
-                    DataCell(
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 4,
-                        ),
-                        decoration: BoxDecoration(
-                          color: hasSubmitted
-                              ? Colors.green.shade50
-                              : Colors.orange.shade50,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Text(
-                          hasSubmitted ? 'Submitted' : 'Pending',
-                          style: TextStyle(
-                            color: hasSubmitted ? Colors.green : Colors.orange,
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
+                  return DataRow(
+                    cells: [
+                      DataCell(
+                        Text(name, style: const TextStyle(fontSize: 12)),
+                      ),
+                      DataCell(
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: hasSubmitted
+                                ? Colors.green.shade50
+                                : Colors.orange.shade50,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            hasSubmitted ? 'Submitted' : 'Pending',
+                            style: TextStyle(
+                              color: hasSubmitted
+                                  ? Colors.green
+                                  : Colors.orange,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                    DataCell(
-                      Text(
-                        hasSubmitted ? '$answeredCount' : '-',
-                        style: const TextStyle(fontSize: 12),
-                      ),
-                    ),
-                    DataCell(
-                      Text(
-                        hasSubmitted ? '$skippedCount' : '-',
-                        style: const TextStyle(fontSize: 12),
-                      ),
-                    ),
-                    DataCell(
-                      Text(
-                        score != null ? '$score / $presentedCount' : '-',
-                        style: const TextStyle(fontSize: 12),
-                      ),
-                    ),
-                    DataCell(
-                      Text(
-                        isFlagged ? 'YES' : 'NO',
-                        style: TextStyle(
-                          color: isFlagged ? Colors.red : Colors.black,
-                          fontSize: 12,
-                          fontWeight: isFlagged
-                              ? FontWeight.bold
-                              : FontWeight.normal,
+                      DataCell(
+                        Text(
+                          hasSubmitted ? '$answeredCount' : '-',
+                          style: const TextStyle(fontSize: 12),
                         ),
                       ),
-                    ),
-                    DataCell(
-                      IconButton(
-                        icon: Icon(
-                          Icons.visibility_outlined,
-                          size: 20,
-                          color: hasSubmitted
-                              ? const Color(0xFF6C5CE7)
-                              : Colors.grey,
+                      DataCell(
+                        Text(
+                          hasSubmitted ? '$skippedCount' : '-',
+                          style: const TextStyle(fontSize: 12),
                         ),
-                        onPressed: hasSubmitted
-                            ? () => _showStudentAnswersDialog(
-                                context,
-                                name,
-                                rawAnswers,
-                              )
-                            : null,
                       ),
-                    ),
-                  ],
-                );
-              }).toList(),
+                      DataCell(
+                        Text(
+                          score != null ? '$score / $presentedCount' : '-',
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                      DataCell(
+                        Text(
+                          isFlagged ? 'YES' : 'NO',
+                          style: TextStyle(
+                            color: isFlagged ? Colors.red : Colors.black,
+                            fontSize: 12,
+                            fontWeight: isFlagged
+                                ? FontWeight.bold
+                                : FontWeight.normal,
+                          ),
+                        ),
+                      ),
+                      DataCell(
+                        IconButton(
+                          icon: Icon(
+                            Icons.visibility_outlined,
+                            size: 20,
+                            color: hasSubmitted
+                                ? const Color(0xFF6C5CE7)
+                                : Colors.grey,
+                          ),
+                          onPressed: hasSubmitted
+                              ? () => _showStudentAnswersDialog(
+                                  context,
+                                  name,
+                                  rawAnswers,
+                                )
+                              : null,
+                        ),
+                      ),
+                    ],
+                  );
+                }).toList(),
+              ),
             ),
           ),
         ),
@@ -7483,13 +8902,18 @@ class _AssignmentInteractionScreenState
 
                   final dynamic rawAnswers = status?['answers'];
                   int answeredCount = 0;
-                  int presentedCount = (widget.assignment['questionsToShow'] as int?) ?? originalMcqData.length;
-                  if (presentedCount > originalMcqData.length) presentedCount = originalMcqData.length;
+                  int presentedCount =
+                      (widget.assignment['questionsToShow'] as int?) ??
+                      originalMcqData.length;
+                  if (presentedCount > originalMcqData.length)
+                    presentedCount = originalMcqData.length;
 
                   if (rawAnswers is Map) {
                     if (rawAnswers.containsKey('responses')) {
                       answeredCount = (rawAnswers['responses'] as Map).length;
-                      presentedCount = (rawAnswers['questions'] as List?)?.length ?? presentedCount;
+                      presentedCount =
+                          (rawAnswers['questions'] as List?)?.length ??
+                          presentedCount;
                     } else {
                       answeredCount = rawAnswers.length;
                     }
@@ -7506,7 +8930,9 @@ class _AssignmentInteractionScreenState
                     ex.TextCellValue(hasSubmitted ? "Submitted" : "Pending"),
                     ex.IntCellValue(answeredCount),
                     ex.IntCellValue(skippedCount),
-                    ex.TextCellValue(score != null ? "$score / $presentedCount" : "-"),
+                    ex.TextCellValue(
+                      score != null ? "$score / $presentedCount" : "-",
+                    ),
                     ex.TextCellValue(isFlagged ? "YES" : "NO"),
                   ]);
                 }
