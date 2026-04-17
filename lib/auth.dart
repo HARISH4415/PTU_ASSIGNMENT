@@ -28,6 +28,7 @@ class _LoginScreenState extends State<LoginScreen> {
       return;
     }
 
+    AppData().loginErrorMessage = null; 
     bool success = await AppData().loginStudent(id, pass);
     
     if (!success) {
@@ -35,13 +36,19 @@ class _LoginScreenState extends State<LoginScreen> {
       success = await AppData().loginTeacher(id, pass);
     }
 
+    if (!success) {
+      // If not a teacher, try as an admin
+      success = await AppData().loginAdmin(id, pass);
+    }
+
     if (success) {
       if (!mounted) return;
       // The PTU_PORTALApp in main.dart handles the routing automatically via AnimatedBuilder
       // We don't need to push manually here.
     } else {
+      String msg = AppData().loginErrorMessage ?? 'Invalid credentials or user not found';
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Invalid credentials or user not found')),
+        SnackBar(content: Text(msg)),
       );
     }
   }

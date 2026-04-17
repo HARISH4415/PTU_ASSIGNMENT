@@ -14,6 +14,7 @@ import 'package:excel/excel.dart' as ex;
 import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'auth.dart';
+import 'admin_views.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -46,9 +47,20 @@ String _formatDateTime12h(DateTime? dt) {
 // ---------------------------------------------------------
 // Global Mock Database
 // ---------------------------------------------------------
-enum UserRole { student, teacher }
+enum UserRole { student, teacher, admin }
 
-enum NavPage { dashboard, courses, liveClass, assignments, mcq, profile }
+enum NavPage {
+  dashboard,
+  courses,
+  liveClass,
+  assignments,
+  mcq,
+  profile,
+  adminDashboard,
+  manageCourses,
+  manageTeachers,
+  manageStudents,
+}
 
 class AppData extends ChangeNotifier {
   static final AppData _instance = AppData._internal();
@@ -77,6 +89,7 @@ class AppData extends ChangeNotifier {
     await prefs.setString('loggedSection', loggedSection ?? '');
     await prefs.setBool('isRegistrationPending', isRegistrationPending);
     await prefs.setStringList('teacherCustomCourses', teacherCustomCourses);
+    await prefs.setString('currentPage', currentPage.name);
   }
 
   Future<void> loadSession() async {
@@ -103,6 +116,17 @@ class AppData extends ChangeNotifier {
       loggedSection = prefs.getString('loggedSection');
       isRegistrationPending = prefs.getBool('isRegistrationPending') ?? false;
       teacherCustomCourses = prefs.getStringList('teacherCustomCourses') ?? [];
+      
+      String? savedPage = prefs.getString('currentPage');
+      if (savedPage != null) {
+        currentPage = NavPage.values.firstWhere(
+          (e) => e.name == savedPage,
+          orElse: () => currentUserRole == UserRole.admin ? NavPage.adminDashboard : NavPage.dashboard,
+        );
+      } else {
+        // Fallback for first time or missing data
+        currentPage = currentUserRole == UserRole.admin ? NavPage.adminDashboard : NavPage.dashboard;
+      }
 
       notifyListeners();
       loadAssignmentsFromSupabase();
@@ -146,6 +170,7 @@ class AppData extends ChangeNotifier {
   String? loggedYear;
   String? loggedSemester;
   String? loggedSection;
+  String? loginErrorMessage;
   bool isRegistrationPending = false;
   List<Map<String, dynamic>> registeredStudents = [];
   List<String> activeDepartments = [];
@@ -231,6 +256,7 @@ class AppData extends ChangeNotifier {
 
   void setPage(NavPage page) {
     currentPage = page;
+    saveSession();
     notifyListeners();
   }
 
@@ -684,6 +710,12 @@ class AppData extends ChangeNotifier {
       }
 
       if (registeredCheck != null) {
+        if (registeredCheck['is_blocked'] == true) {
+          debugPrint('Login blocked for student: $enrollNo');
+          loginErrorMessage = 'Your ID is blocked. Contact admin to unblock it.';
+          return false;
+        }
+        loginErrorMessage = null; // Clear if not blocked and found
         if (registeredCheck['password'] == passwordInput) {
           isLoggedIn = true;
           isRegistrationPending = false;
@@ -752,6 +784,37 @@ class AppData extends ChangeNotifier {
       } catch (_) {}
     }
 
+    return false;
+  }
+
+  Future<bool> loginAdmin(String adminId, String passwordInput) async {
+    try {
+      final res = await supabase
+          .from('admin_enrollments')
+          .select()
+          .eq('admin_id', adminId)
+          .maybeSingle();
+
+      if (res != null) {
+        if (res['password'] == passwordInput) {
+          isLoggedIn = true;
+          isRegistrationPending = false;
+          currentUserRole = UserRole.admin;
+          currentPage = NavPage.adminDashboard;
+          loggedTeacherId = adminId;
+          loggedName = res['admin_name']?.toString() ?? 'Admin';
+          saveSession();
+          notifyListeners();
+          debugPrint('Admin Login Success: $adminId');
+          return true;
+        } else {
+          debugPrint('Admin Login: Password mismatch for $adminId');
+          return false;
+        }
+      }
+    } catch (e) {
+      debugPrint('Error in loginAdmin: $e');
+    }
     return false;
   }
 
@@ -957,6 +1020,73 @@ class AppData extends ChangeNotifier {
     loggedSection = null;
     clearSession();
     notifyListeners();
+  }
+
+  Future<void> addCourseMaster(String name) async {
+    try {
+      await supabase.from('courses_master').insert({'name': name});
+      fetchPredefinedCourses(); // Refresh local list
+    } catch (e) {
+      debugPrint('Error adding course: $e');
+      rethrow;
+    }
+  }
+
+  Future<void> enrollTeacher(String teacherId, String teacherName) async {
+    try {
+      await supabase.from('teacher_enrollments').insert({
+        'teacher_id': teacherId,
+        'teacher_name': teacherName,
+      });
+    } catch (e) {
+      debugPrint('Error enrolling teacher: $e');
+      rethrow;
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> fetchAllTeacherEnrollments() async {
+    try {
+      final res = await supabase.from('teacher_enrollments').select();
+      return List<Map<String, dynamic>>.from(res);
+    } catch (e) {
+      debugPrint('Error fetching teachers: $e');
+      return [];
+    }
+  }
+
+  Future<void> deleteCourseMaster(String name) async {
+    try {
+      await supabase.from('courses_master').delete().eq('name', name);
+      fetchPredefinedCourses();
+    } catch (e) {
+      debugPrint('Error deleting course: $e');
+      rethrow;
+    }
+  }
+
+  Future<void> deleteTeacherEnrollment(String teacherId) async {
+    try {
+      await supabase
+          .from('teacher_enrollments')
+          .delete()
+          .eq('teacher_id', teacherId);
+    } catch (e) {
+      debugPrint('Error deleting teacher: $e');
+      rethrow;
+    }
+  }
+
+  Future<void> toggleStudentBlock(String enrollNo, bool blockStatus) async {
+    try {
+      await supabase
+          .from('student_registered_details')
+          .update({'is_blocked': blockStatus})
+          .eq('enrollno', enrollNo);
+      fetchRegisteredStudents(); // Refresh list
+    } catch (e) {
+      debugPrint('Error toggling student block: $e');
+      rethrow;
+    }
   }
 
   void setMeetingCode(String code) {
@@ -1472,27 +1602,50 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
                 ),
               ),
               const SizedBox(height: 12),
-              _buildNavItem(
-                Icons.grid_view_rounded,
-                'Dashboard',
-                NavPage.dashboard,
-              ),
-              _buildNavItem(
-                Icons.library_books_rounded,
-                'Courses',
-                NavPage.courses,
-              ),
-              _buildNavItem(
-                Icons.video_camera_front_rounded,
-                'Live Class WebRTC',
-                NavPage.liveClass,
-              ),
-              _buildNavItem(
-                Icons.assignment_rounded,
-                'Assignments',
-                NavPage.assignments,
-              ),
-              _buildNavItem(Icons.quiz_rounded, 'MCQs', NavPage.mcq),
+              if (AppData().currentUserRole == UserRole.admin) ...[
+                _buildNavItem(
+                  Icons.dashboard_customize_rounded,
+                  'Admin Dashboard',
+                  NavPage.adminDashboard,
+                ),
+                _buildNavItem(
+                  Icons.menu_book_rounded,
+                  'Manage Courses',
+                  NavPage.manageCourses,
+                ),
+                _buildNavItem(
+                  Icons.people_alt_rounded,
+                  'Manage Teachers',
+                  NavPage.manageTeachers,
+                ),
+                _buildNavItem(
+                  Icons.person_search_rounded,
+                  'Manage Students',
+                  NavPage.manageStudents,
+                ),
+              ] else ...[
+                _buildNavItem(
+                  Icons.grid_view_rounded,
+                  'Dashboard',
+                  NavPage.dashboard,
+                ),
+                _buildNavItem(
+                  Icons.library_books_rounded,
+                  'Courses',
+                  NavPage.courses,
+                ),
+                _buildNavItem(
+                  Icons.video_camera_front_rounded,
+                  'Live Class WebRTC',
+                  NavPage.liveClass,
+                ),
+                _buildNavItem(
+                  Icons.assignment_rounded,
+                  'Assignments',
+                  NavPage.assignments,
+                ),
+                _buildNavItem(Icons.quiz_rounded, 'MCQs', NavPage.mcq),
+              ],
               _buildNavItem(Icons.person_rounded, 'Profile', NavPage.profile),
             ],
           ),
@@ -1523,22 +1676,35 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
     UserRole role = AppData().currentUserRole;
     String name =
         AppData().loggedName ??
-        (role == UserRole.teacher ? 'Teacher' : 'Student');
+        (role == UserRole.admin
+            ? 'Administrator'
+            : (role == UserRole.teacher ? 'Teacher' : 'Student'));
+
+    Color bgColor = Colors.blue.shade100;
+    Color iconColor = Colors.blue.shade800;
+    IconData icon = Icons.face;
+    String subText = 'Student Portal';
+
+    if (role == UserRole.teacher) {
+      bgColor = Colors.amber.shade100;
+      iconColor = Colors.amber.shade800;
+      icon = Icons.person_4;
+      subText = 'Teacher Portal';
+    } else if (role == UserRole.admin) {
+      bgColor = Colors.purple.shade100;
+      iconColor = Colors.purple.shade800;
+      icon = Icons.admin_panel_settings_rounded;
+      subText = 'Admin Portal';
+    }
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24.0),
       child: Row(
         children: [
           CircleAvatar(
             radius: 20,
-            backgroundColor: role == UserRole.teacher
-                ? Colors.amber.shade100
-                : Colors.blue.shade100,
-            child: Icon(
-              role == UserRole.teacher ? Icons.person_4 : Icons.face,
-              color: role == UserRole.teacher
-                  ? Colors.amber.shade800
-                  : Colors.blue.shade800,
-            ),
+            backgroundColor: bgColor,
+            child: Icon(icon, color: iconColor, size: 20),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -1554,9 +1720,7 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
                   ),
                 ),
                 Text(
-                  role == UserRole.teacher
-                      ? 'Teacher Portal'
-                      : 'Student Portal',
+                  subText,
                   style: TextStyle(color: Colors.grey.shade500, fontSize: 12),
                 ),
               ],
@@ -1615,6 +1779,14 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
             return const McqCentralView();
           case NavPage.profile:
             return const ProfileView();
+          case NavPage.adminDashboard:
+            return const AdminDashboardView();
+          case NavPage.manageCourses:
+            return const ManageCoursesView();
+          case NavPage.manageTeachers:
+            return const ManageTeachersView();
+          case NavPage.manageStudents:
+            return const ManageStudentsView();
         }
       },
     );
@@ -2663,51 +2835,56 @@ class ProfileView extends StatelessWidget {
   }
 
   Widget _buildPersonalAndAcademicInfo(bool isTeacher) {
+    final isAdmin = AppData().currentUserRole == UserRole.admin;
     return Column(
       children: [
         _buildInfoCard('Personal Information', Icons.person_outline, [
           _buildInfoRow('Full Name', AppData().loggedName ?? 'N/A'),
-          if (isTeacher &&
-              AppData().loggedEmail != null &&
-              AppData().loggedEmail!.isNotEmpty)
-            _buildInfoRow('Email Address', AppData().loggedEmail!),
-          _buildInfoRow('Phone Number', AppData().loggedPhone ?? 'N/A'),
-          if (!isTeacher)
-            _buildInfoRow('Registration No', AppData().loggedEnrollNo ?? 'N/A'),
-          if (isTeacher)
-            _buildInfoRow('Teacher ID', AppData().loggedTeacherId ?? 'N/A'),
+          if (!isAdmin) ...[
+            if (isTeacher &&
+                AppData().loggedEmail != null &&
+                AppData().loggedEmail!.isNotEmpty)
+              _buildInfoRow('Email Address', AppData().loggedEmail!),
+            _buildInfoRow('Phone Number', AppData().loggedPhone ?? 'N/A'),
+            if (!isTeacher)
+              _buildInfoRow('Registration No', AppData().loggedEnrollNo ?? 'N/A'),
+            if (isTeacher)
+              _buildInfoRow('Teacher ID', AppData().loggedTeacherId ?? 'N/A'),
+          ],
         ]),
-        const SizedBox(height: 24),
-        _buildInfoCard(
-          isTeacher ? 'Professional Details' : 'Academic Details',
-          isTeacher ? Icons.work_outline : Icons.school_outlined,
-          isTeacher
-              ? [
-                  _buildInfoRow(
-                    'Department',
-                    AppData().loggedDepartment ?? 'N/A',
-                  ),
-                  _buildInfoRow(
-                    'Designation',
-                    AppData().loggedDesignation ?? 'N/A',
-                  ),
-                  _buildInfoRow('Academic Year', AppData().loggedYear ?? 'N/A'),
-                  _buildInfoRow(
-                    'Current Semester',
-                    AppData().loggedSemester ?? 'N/A',
-                  ),
-                ]
-              : [
-                  _buildInfoRow(
-                    'Department',
-                    AppData().loggedDepartment ?? 'N/A',
-                  ),
-                  _buildInfoRow(
-                    'Year / Semester',
-                    '${AppData().loggedYear ?? 'N/A'} / ${AppData().loggedSemester ?? 'N/A'}',
-                  ),
-                ],
-        ),
+        if (!isAdmin) ...[
+          const SizedBox(height: 24),
+          _buildInfoCard(
+            isTeacher ? 'Professional Details' : 'Academic Details',
+            isTeacher ? Icons.work_outline : Icons.school_outlined,
+            isTeacher
+                ? [
+                    _buildInfoRow(
+                      'Department',
+                      AppData().loggedDepartment ?? 'N/A',
+                    ),
+                    _buildInfoRow(
+                      'Designation',
+                      AppData().loggedDesignation ?? 'N/A',
+                    ),
+                    _buildInfoRow('Academic Year', AppData().loggedYear ?? 'N/A'),
+                    _buildInfoRow(
+                      'Current Semester',
+                      AppData().loggedSemester ?? 'N/A',
+                    ),
+                  ]
+                : [
+                    _buildInfoRow(
+                      'Department',
+                      AppData().loggedDepartment ?? 'N/A',
+                    ),
+                    _buildInfoRow(
+                      'Year / Semester',
+                      '${AppData().loggedYear ?? 'N/A'} / ${AppData().loggedSemester ?? 'N/A'}',
+                    ),
+                  ],
+          ),
+        ],
       ],
     );
   }
@@ -2825,22 +3002,20 @@ class ProfileView extends StatelessWidget {
                 borderRadius: BorderRadius.circular(30),
               ),
               child: Text(
-                isTeacher ? 'Senior Faculty' : 'Undergraduate Student',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w600,
+                AppData().currentUserRole == UserRole.admin
+                    ? 'Administrator'
+                    : (isTeacher ? 'Senior Faculty' : 'Undergraduate Student'),
+                style: const TextStyle(color: Colors.white, fontSize: 12),
+              ),
+            ),
+            if (AppData().currentUserRole != UserRole.admin)
+              Text(
+                'ID: ${isTeacher ? AppData().loggedTeacherId : AppData().loggedEnrollNo}',
+                style: TextStyle(
+                  color: Colors.white.withAlpha(200),
+                  fontSize: 14,
                 ),
               ),
-            ),
-            Text(
-              'ID: ${isTeacher ? AppData().loggedTeacherId : AppData().loggedEnrollNo}',
-              style: TextStyle(
-                color: Colors.white.withAlpha(200),
-                fontSize: 12,
-                letterSpacing: 0.5,
-              ),
-            ),
           ],
         ),
       ],
@@ -3862,9 +4037,11 @@ class CoursesView extends StatelessWidget {
       crossAxisCount = 2;
     }
 
-    return Padding(
-      padding: EdgeInsets.all(isMobile ? 16.0 : 40.0),
-      child: Column(
+    return ListenableBuilder(
+      listenable: AppData(),
+      builder: (context, _) => Padding(
+        padding: EdgeInsets.all(isMobile ? 16.0 : 40.0),
+        child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
@@ -4026,8 +4203,9 @@ class CoursesView extends StatelessWidget {
           ),
         ],
       ),
-    );
-  }
+    ),
+  );
+}
 
   void _showDeleteConfirmation(BuildContext context, String courseName) {
     showDialog(
@@ -4076,7 +4254,7 @@ class CoursesView extends StatelessWidget {
             style: GoogleFonts.outfit(fontWeight: FontWeight.bold),
           ),
           content: Container(
-            width: double.maxFinite,
+            width: 500,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -5387,9 +5565,8 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                             ),
                           );
                         }).toList(),
-                        onChanged: (val) => setDialogState(
-                          () => currentSelectedClassId = val,
-                        ),
+                        onChanged: (val) =>
+                            setDialogState(() => currentSelectedClassId = val),
                         validator: (v) => v == null ? 'Required' : null,
                       ),
                       const SizedBox(height: 16),
@@ -8016,9 +8193,9 @@ class _AssignmentInteractionScreenState
       if (status['is_flagged'] == true) flaggedCount++;
     }
 
-    final deptStudents = AppData().registeredStudents.where(
-      (s) => s['department'] == widget.classData['title'],
-    ).toList();
+    final deptStudents = AppData().registeredStudents
+        .where((s) => s['department'] == widget.classData['title'])
+        .toList();
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -8683,8 +8860,7 @@ class _AssignmentInteractionScreenState
   }
 
   void _showAllResultsSummaryDialog(BuildContext context) {
-    final allStudents = AppData()
-        .registeredStudents
+    final allStudents = AppData().registeredStudents
         .where((s) => s['department'] == widget.classData['title'])
         .toList();
     final statuses = AppData().currentAssignmentStatuses;
