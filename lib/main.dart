@@ -274,15 +274,11 @@ class AppData extends ChangeNotifier {
       myDepts.addAll(teacherCustomCourses);
       return myDepts.toSet().map((d) => _buildClassNode(d)).toList();
     } else {
-      // Students see all active departments
-      if (activeDepartments.isEmpty) {
-        // Fallback to their own department if no others found yet
-        if (loggedDepartment != null && loggedDepartment!.isNotEmpty) {
-          return [_buildClassNode(loggedDepartment!)];
-        }
-        return [];
+      // Students ONLY see their own department's course
+      if (loggedDepartment != null && loggedDepartment!.isNotEmpty) {
+        return [_buildClassNode(loggedDepartment!)];
       }
-      return activeDepartments.map((d) => _buildClassNode(d)).toList();
+      return [];
     }
   }
 

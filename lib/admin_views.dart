@@ -531,10 +531,7 @@ class _ManageTeachersViewState extends State<ManageTeachersView> {
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text(
-              'Delete',
-              style: TextStyle(color: Colors.red),
-            ),
+            child: const Text('Delete', style: TextStyle(color: Colors.red)),
           ),
         ],
       ),
@@ -571,6 +568,7 @@ class _ManageTeachersViewState extends State<ManageTeachersView> {
       if (mounted) setState(() => _isLoading = false);
     }
   }
+
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
@@ -629,15 +627,35 @@ class _ManageTeachersViewState extends State<ManageTeachersView> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           if (isSmall) ...[
-                            _buildTextField('Teacher ID', _idController, 'e.g. TCH001'),
+                            _buildTextField(
+                              'Teacher ID',
+                              _idController,
+                              'e.g. TCH001',
+                            ),
                             const SizedBox(height: 20),
-                            _buildTextField('Full Name', _nameController, 'e.g. Dr. John Doe'),
+                            _buildTextField(
+                              'Full Name',
+                              _nameController,
+                              'e.g. Dr. John Doe',
+                            ),
                           ] else
                             Row(
                               children: [
-                                Expanded(child: _buildTextField('Teacher ID', _idController, 'e.g. TCH001')),
+                                Expanded(
+                                  child: _buildTextField(
+                                    'Teacher ID',
+                                    _idController,
+                                    'e.g. TCH001',
+                                  ),
+                                ),
                                 const SizedBox(width: 20),
-                                Expanded(child: _buildTextField('Full Name', _nameController, 'e.g. Dr. John Doe')),
+                                Expanded(
+                                  child: _buildTextField(
+                                    'Full Name',
+                                    _nameController,
+                                    'e.g. Dr. John Doe',
+                                  ),
+                                ),
                               ],
                             ),
                           const SizedBox(height: 24),
@@ -648,7 +666,9 @@ class _ManageTeachersViewState extends State<ManageTeachersView> {
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: const Color(0xFF6C5CE7),
                                 foregroundColor: Colors.white,
-                                padding: const EdgeInsets.symmetric(vertical: 20),
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 20,
+                                ),
                                 shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(12),
                                 ),
@@ -686,63 +706,67 @@ class _ManageTeachersViewState extends State<ManageTeachersView> {
             child: Container(
               constraints: const BoxConstraints(maxWidth: 800),
               width: double.infinity,
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: Colors.grey.shade200),
-            ),
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: ConstrainedBox(
-                constraints: BoxConstraints(
-                  minWidth: screenWidth < 800 ? screenWidth - 32 : 800,
-                ),
-                child: DataTable(
-                  headingTextStyle: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    color: Colors.black87,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: Colors.grey.shade200),
+              ),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    minWidth: screenWidth < 800 ? screenWidth - 32 : 800,
                   ),
-                  columns: const [
-                    DataColumn(label: Text('Teacher ID')),
-                    DataColumn(label: Text('Name')),
-                    DataColumn(label: Text('Actions')),
-                  ],
-                  rows: _teachers.map((t) {
-                    return DataRow(
-                      cells: [
-                        DataCell(Text(t['teacher_id']?.toString() ?? '-')),
-                        DataCell(Text(t['teacher_name']?.toString() ?? '-')),
-                        DataCell(
-                          IconButton(
-                            onPressed: () async {
-                              final teacherId =
-                                  t['teacher_id']?.toString() ?? '';
-                              final name = t['teacher_name']?.toString() ?? '';
-                              final confirm = await showDialog<bool>(
-                                context: context,
-                                builder: (ctx) => AlertDialog(
-                                  title: const Text('Delete Teacher'),
-                                  content: Text(
-                                    'Are you sure you want to delete "$name" ($teacherId)?',
-                                  ),
-                                  actions: [
-                                    TextButton(
-                                      onPressed: () =>
-                                          Navigator.pop(ctx, false),
-                                      child: const Text('Cancel'),
+                  child: DataTable(
+                    headingTextStyle: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.black87,
+                    ),
+                    columns: const [
+                      DataColumn(label: Text('Teacher ID')),
+                      DataColumn(label: Text('Name')),
+                      DataColumn(label: Text('Actions')),
+                    ],
+                    rows: _teachers.map((t) {
+                      return DataRow(
+                        cells: [
+                          DataCell(Text(t['teacher_id']?.toString() ?? '-')),
+                          DataCell(Text(t['teacher_name']?.toString() ?? '-')),
+                          DataCell(
+                            IconButton(
+                              onPressed: () async {
+                                final teacherId =
+                                    t['teacher_id']?.toString() ?? '';
+                                final name =
+                                    t['teacher_name']?.toString() ?? '';
+                                final confirm = await showDialog<bool>(
+                                  context: context,
+                                  builder: (ctx) => AlertDialog(
+                                    title: const Text('Delete Teacher'),
+                                    content: Text(
+                                      'Are you sure you want to delete "$name" ($teacherId)?',
                                     ),
-                                    TextButton(
-                                      onPressed: () => Navigator.pop(ctx, true),
-                                      child: const Text(
-                                        'Delete',
-                                        style: TextStyle(color: Colors.red),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () =>
+                                            Navigator.pop(ctx, false),
+                                        child: const Text('Cancel'),
                                       ),
-                                    ),
-                                  ],
-                                ),
-                              );
+                                      TextButton(
+                                        onPressed: () =>
+                                            Navigator.pop(ctx, true),
+                                        child: const Text(
+                                          'Delete',
+                                          style: TextStyle(color: Colors.red),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
                                 if (confirm == true) {
-                                  await AppData().deleteTeacherEnrollment(teacherId);
+                                  await AppData().deleteTeacherEnrollment(
+                                    teacherId,
+                                  );
                                   _loadTeachers();
                                 }
                               },
@@ -765,7 +789,6 @@ class _ManageTeachersViewState extends State<ManageTeachersView> {
       ),
     );
   }
-
   Widget _buildTextField(
     String label,
     TextEditingController controller,
