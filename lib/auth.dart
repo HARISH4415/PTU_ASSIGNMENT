@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'dart:async';
 import 'main.dart';
 
 // ---------------------------------------------------------
@@ -16,6 +17,39 @@ class _LoginScreenState extends State<LoginScreen> {
   final TextEditingController _idController = TextEditingController();
   final TextEditingController _passController = TextEditingController();
   bool _isPasswordVisible = false;
+  String? _studentName;
+  Timer? _debounce;
+
+  @override
+  void initState() {
+    super.initState();
+    _idController.addListener(_onIdChanged);
+  }
+
+  @override
+  void dispose() {
+    _idController.removeListener(_onIdChanged);
+    _idController.dispose();
+    _passController.dispose();
+    _debounce?.cancel();
+    super.dispose();
+  }
+
+  void _onIdChanged() {
+    if (_debounce?.isActive ?? false) _debounce!.cancel();
+    _debounce = Timer(const Duration(milliseconds: 200), () async {
+      final id = _idController.text.trim();
+      if (id.length < 3) {
+        if (mounted) setState(() => _studentName = null);
+        return;
+      }
+      
+      final name = await AppData().fetchUserName(id);
+      if (mounted) {
+        setState(() => _studentName = name);
+      }
+    });
+  }
 
   void _handleLogin() async {
     final id = _idController.text.trim();
@@ -139,6 +173,20 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                   ),
                 ),
+                if (_studentName != null) ...[
+                  const SizedBox(height: 8),
+                  Padding(
+                    padding: const EdgeInsets.only(left: 4),
+                    child: Text(
+                      'Welcome, $_studentName',
+                      style: GoogleFonts.plusJakartaSans(
+                        color: const Color(0xFF6C5CE7),
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 24),
                 _buildLabel('Password'),
                 TextField(
@@ -167,7 +215,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 Align(
                   alignment: Alignment.centerRight,
                   child: TextButton(
-                    onPressed: () {},
+                    onPressed: () => _showForgotPasswordDialog(),
                     child: const Text('Forgot Password?'),
                   ),
                 ),
@@ -192,6 +240,13 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  void _showForgotPasswordDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => const ForgotPasswordDialog(),
     );
   }
 
@@ -235,20 +290,33 @@ class StudentRegistrationScreen extends StatefulWidget {
 
 class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
   final _formKey = GlobalKey<FormState>();
-  final TextEditingController _nameController = TextEditingController(
-    text: AppData().loggedName,
-  );
-  final TextEditingController _phoneController = TextEditingController();
+  late final TextEditingController _nameController;
+  late final TextEditingController _phoneController;
   final TextEditingController _passController = TextEditingController();
+  final TextEditingController _confirmPassController = TextEditingController();
   bool _isLoading = false;
   bool _isPasswordVisible = false;
+  bool _isConfirmPasswordVisible = false;
 
   // Dropdown selections
   String? _selectedDepartment;
   String? _selectedYear;
   String? _selectedSemester;
-
   DateTime? _selectedDob;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameController = TextEditingController(text: AppData().loggedName);
+    _phoneController = TextEditingController(text: AppData().loggedPhone);
+    _selectedDepartment = AppData().loggedDepartment;
+    _selectedYear = AppData().loggedYear;
+    _selectedSemester = AppData().loggedSemester;
+    
+    if (AppData().loggedDob != null) {
+      _selectedDob = DateTime.tryParse(AppData().loggedDob!);
+    }
+  }
 
   // Options
   final List<String> _departments = [
@@ -298,6 +366,12 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
       if (_selectedDob == null) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Please select your Date of Birth')),
+        );
+        return;
+      }
+      if (_passController.text != _confirmPassController.text) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Passwords do not match')),
         );
         return;
       }
@@ -400,17 +474,12 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
                   _buildRegLabel('Phone Number'),
                   TextFormField(
                     controller: _phoneController,
+                    enabled: false,
                     keyboardType: TextInputType.phone,
                     maxLength: 10,
                     decoration: _inputDeco(
                       Icons.phone_outlined,
-                      hint: 'e.g. 9876543210',
                     ),
-                    validator: (v) {
-                      if (v == null || v.isEmpty) return 'Required';
-                      if (v.length != 10) return 'Enter a valid 10-digit number';
-                      return null;
-                    },
                   ),
                   const SizedBox(height: 16),
 
@@ -418,29 +487,24 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
 
                   // Date of Birth
                   _buildRegLabel('Date of Birth'),
-                  GestureDetector(
-                    onTap: _pickDob,
-                    child: AbsorbPointer(
-                      child: TextFormField(
-                        readOnly: true,
-                        decoration: _inputDeco(
-                          Icons.calendar_today_outlined,
-                          hint: 'Tap to select date',
-                        ).copyWith(
-                          suffixIcon: const Icon(Icons.arrow_drop_down),
-                          hintText:
-                              _selectedDob != null
-                                  ? '${_selectedDob!.day.toString().padLeft(2, '0')}/${_selectedDob!.month.toString().padLeft(2, '0')}/${_selectedDob!.year}'
-                                  : 'Tap to select date',
-                        ),
-                        controller: TextEditingController(
-                          text:
-                              _selectedDob != null
-                                  ? '${_selectedDob!.day.toString().padLeft(2, '0')}/${_selectedDob!.month.toString().padLeft(2, '0')}/${_selectedDob!.year}'
-                                  : '',
-                        ),
-                        validator:
-                            (v) => _selectedDob == null ? 'Required' : null,
+                  AbsorbPointer(
+                    absorbing: true,
+                    child: TextFormField(
+                      readOnly: true,
+                      enabled: false,
+                      decoration: _inputDeco(
+                        Icons.calendar_today_outlined,
+                      ).copyWith(
+                        hintText:
+                            _selectedDob != null
+                                ? '${_selectedDob!.day.toString().padLeft(2, '0')}/${_selectedDob!.month.toString().padLeft(2, '0')}/${_selectedDob!.year}'
+                                : '-',
+                      ),
+                      controller: TextEditingController(
+                        text:
+                            _selectedDob != null
+                                ? '${_selectedDob!.day.toString().padLeft(2, '0')}/${_selectedDob!.month.toString().padLeft(2, '0')}/${_selectedDob!.year}'
+                                : '',
                       ),
                     ),
                   ),
@@ -448,21 +512,10 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
 
                   // Department
                   _buildRegLabel('Department'),
-                  DropdownButtonFormField<String>(
-                    value: _selectedDepartment,
+                  TextFormField(
+                    initialValue: _selectedDepartment ?? '-',
+                    enabled: false,
                     decoration: _inputDeco(Icons.account_balance_outlined),
-                    hint: const Text('Select Department'),
-                    isExpanded: true,
-                    items:
-                        _departments
-                            .map(
-                              (d) =>
-                                  DropdownMenuItem(value: d, child: Text(d)),
-                            )
-                            .toList(),
-                    onChanged:
-                        (val) => setState(() => _selectedDepartment = val),
-                    validator: (v) => v == null ? 'Please select' : null,
                   ),
                   const SizedBox(height: 16),
 
@@ -474,26 +527,10 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             _buildRegLabel('Year'),
-                            DropdownButtonFormField<String>(
-                              value: _selectedYear,
+                            TextFormField(
+                              initialValue: _selectedYear ?? '-',
+                              enabled: false,
                               decoration: _inputDeco(Icons.school_outlined),
-                              hint: const Text('Year'),
-                              isExpanded: true,
-                              items:
-                                  _years
-                                      .map(
-                                        (y) => DropdownMenuItem(
-                                          value: y,
-                                          child: Text(y),
-                                        ),
-                                      )
-                                      .toList(),
-                              onChanged: (val) => setState(() {
-                                _selectedYear = val;
-                                _selectedSemester =
-                                    null; // reset semester on year change
-                              }),
-                              validator: (v) => v == null ? 'Required' : null,
                             ),
                           ],
                         ),
@@ -504,24 +541,12 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             _buildRegLabel('Semester'),
-                            DropdownButtonFormField<String>(
-                              value: _selectedSemester,
+                            TextFormField(
+                              initialValue: _selectedSemester != null
+                                  ? 'Semester $_selectedSemester'
+                                  : '-',
+                              enabled: false,
                               decoration: _inputDeco(Icons.book_outlined),
-                              hint: const Text('Semester'),
-                              isExpanded: true,
-                              items:
-                                  semOptions
-                                      .map(
-                                        (s) => DropdownMenuItem(
-                                          value: s,
-                                          child: Text('Semester $s'),
-                                        ),
-                                      )
-                                      .toList(),
-                              onChanged:
-                                  (val) =>
-                                      setState(() => _selectedSemester = val),
-                              validator: (v) => v == null ? 'Required' : null,
                             ),
                           ],
                         ),
@@ -550,8 +575,41 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
                         ),
                       ),
                     ),
-                    validator:
-                        (v) => v!.length < 6 ? 'Minimum 6 characters' : null,
+                    validator: (v) {
+                      if (v!.length < 6) return 'Minimum 6 characters';
+                      if (v == 'ptu@123') {
+                        return 'Default password not allowed. Please choose a different one.';
+                      }
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Confirm Password
+                  _buildRegLabel('Confirm Password'),
+                  TextFormField(
+                    controller: _confirmPassController,
+                    obscureText: !_isConfirmPasswordVisible,
+                    decoration: _inputDeco(Icons.lock_clock_outlined).copyWith(
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          _isConfirmPasswordVisible
+                              ? Icons.visibility
+                              : Icons.visibility_off,
+                          size: 20,
+                        ),
+                        onPressed: () => setState(
+                          () => _isConfirmPasswordVisible =
+                              !_isConfirmPasswordVisible,
+                        ),
+                      ),
+                    ),
+                    validator: (v) {
+                      if (v != _passController.text) {
+                        return 'Passwords do not match';
+                      }
+                      return null;
+                    },
                   ),
                   const SizedBox(height: 32),
 
@@ -639,17 +697,6 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
   String? _selectedDesignation;
   String? _selectedYear;
   String? _selectedSemester;
-
-  final List<String> _departments = [
-    'Marketing',
-    'Finance',
-    'International Business',
-    'Human Resource Management',
-    'General',
-    'Hospital Management',
-    'Tourism',
-    'Operations & Supply Chain Management',
-  ];
 
   final List<String> _designations = [
     'Assistant Professor',
@@ -762,8 +809,10 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
                   DropdownButtonFormField<String>(
                     value: _selectedDepartment,
                     decoration: _inputDecoIcon(Icons.account_balance_outlined),
-                    items: _departments
-                        .map((d) => DropdownMenuItem(value: d, child: Text(d)))
+                    items: AppData().predefinedCourses
+                        .map((course) => DropdownMenuItem(
+                            value: course['name'].toString(),
+                            child: Text(course['name'].toString())))
                         .toList(),
                     onChanged: (v) => setState(() => _selectedDepartment = v),
                     validator: (v) => v == null ? 'Required' : null,
@@ -862,7 +911,13 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
                             () => _isPasswordVisible = !_isPasswordVisible),
                       ),
                     ),
-                    validator: (v) => v!.length < 6 ? 'Min 6 chars' : null,
+                    validator: (v) {
+                      if (v!.length < 6) return 'Min 6 chars';
+                      if (v == 'ptu@123') {
+                        return 'Default password not allowed. Please choose a different one.';
+                      }
+                      return null;
+                    },
                   ),
                   const SizedBox(height: 32),
 
@@ -909,6 +964,165 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
       border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       counterText: '',
+    );
+  }
+}
+
+class ForgotPasswordDialog extends StatefulWidget {
+  const ForgotPasswordDialog({super.key});
+
+  @override
+  State<ForgotPasswordDialog> createState() => _ForgotPasswordDialogState();
+}
+
+class _ForgotPasswordDialogState extends State<ForgotPasswordDialog> {
+  final _idController = TextEditingController();
+  final _nameController = TextEditingController();
+  final _dobController = TextEditingController();
+  final _newPassController = TextEditingController();
+  final _confirmPassController = TextEditingController();
+
+  bool _isVerified = false;
+  bool _isLoading = false;
+  Map<String, dynamic>? _accountToken;
+
+  Future<void> _handleVerify() async {
+    final id = _idController.text.trim();
+    final name = _nameController.text.trim();
+    final dob = _dobController.text.trim();
+
+    if (id.isEmpty || name.isEmpty || dob.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please fill all verification details')),
+      );
+      return;
+    }
+
+    setState(() => _isLoading = true);
+    final result = await AppData().verifyUserIdentity(id, name, dob);
+    setState(() => _isLoading = false);
+
+    if (result != null) {
+      setState(() {
+        _isVerified = true;
+        _accountToken = result;
+      });
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Identity verification failed. Please check your details.')),
+      );
+    }
+  }
+
+  Future<void> _handleReset() async {
+    final pass = _newPassController.text.trim();
+    final confirm = _confirmPassController.text.trim();
+
+    if (pass.isEmpty || confirm.isEmpty) return;
+    if (pass != confirm) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Passwords do not match')),
+      );
+      return;
+    }
+
+    setState(() => _isLoading = true);
+    final success = await AppData().updateUserPassword(
+      _idController.text.trim(),
+      _accountToken!['table'],
+      _accountToken!['id_col'],
+      pass,
+    );
+    setState(() => _isLoading = false);
+
+    if (success) {
+      if (mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Password reset successfully! Please log in.')),
+        );
+      }
+    }
+  }
+
+  Future<void> _pickDob() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: DateTime(2005, 1, 1),
+      firstDate: DateTime(1980),
+      lastDate: DateTime.now(),
+    );
+    if (picked != null) {
+      setState(() {
+        _dobController.text =
+            '${picked.year}-${picked.month.toString().padLeft(2, '0')}-${picked.day.toString().padLeft(2, '0')}';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(
+        _isVerified ? 'Reset Password' : 'Verify Identity',
+        style: GoogleFonts.plusJakartaSans(fontWeight: FontWeight.bold),
+      ),
+      content: SizedBox(
+        width: 400,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (!_isVerified) ...[
+                const Text('Enter your details as provided during registration to verify your identity.'),
+                const SizedBox(height: 16),
+                _buildField('Enrollment No / ID', _idController, Icons.badge_outlined),
+                const SizedBox(height: 12),
+                _buildField('Full Name', _nameController, Icons.person_outline),
+                const SizedBox(height: 12),
+                GestureDetector(
+                  onTap: _pickDob,
+                  child: AbsorbPointer(
+                    child: _buildField('Date of Birth', _dobController, Icons.calendar_today_outlined),
+                  ),
+                ),
+              ] else ...[
+                const Text('Verification successful. Please enter a new password.'),
+                const SizedBox(height: 16),
+                _buildField('New Password', _newPassController, Icons.lock_outline, obscure: true),
+                const SizedBox(height: 12),
+                _buildField('Confirm Password', _confirmPassController, Icons.lock_reset_rounded, obscure: true),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+        ElevatedButton(
+          onPressed: _isLoading ? null : (_isVerified ? _handleReset : _handleVerify),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: const Color(0xFF6C5CE7),
+            foregroundColor: Colors.white,
+          ),
+          child: _isLoading
+              ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+              : Text(_isVerified ? 'Reset Password' : 'Verify Identity'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildField(String hint, TextEditingController controller, IconData icon, {bool obscure = false}) {
+    return TextField(
+      controller: controller,
+      obscureText: obscure,
+      decoration: InputDecoration(
+        hintText: hint,
+        prefixIcon: Icon(icon, size: 20),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      ),
     );
   }
 }

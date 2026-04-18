@@ -60,6 +60,7 @@ enum NavPage {
   manageCourses,
   manageTeachers,
   manageStudents,
+  studentDetails,
 }
 
 class AppData extends ChangeNotifier {
@@ -162,6 +163,7 @@ class AppData extends ChangeNotifier {
   bool isLoggedIn = false;
   String? loggedEmail;
   String? loggedPhone;
+  String? loggedDob;
   String? loggedEnrollNo;
   String? loggedTeacherId;
   String? loggedName;
@@ -172,7 +174,9 @@ class AppData extends ChangeNotifier {
   String? loggedSection;
   String? loginErrorMessage;
   bool isRegistrationPending = false;
+  Map<String, dynamic>? currentUserData;
   List<Map<String, dynamic>> registeredStudents = [];
+  List<Map<String, dynamic>> internalStudents = [];
   List<String> activeDepartments = [];
   List<Map<String, dynamic>> enrolledStudents = [];
 
@@ -194,29 +198,36 @@ class AppData extends ChangeNotifier {
     await prefs.clear();
   }
 
-  List<String> predefinedCourses = [
-    'Marketing',
-    'Finance',
-    'International Business',
-    'Human Resource Management',
-    'General',
-    'Hospital Management',
-    'Tourism',
-    'Operations & Supply Chain Management',
-  ];
+  List<Map<String, dynamic>> predefinedCourses = [];
 
   Future<void> fetchPredefinedCourses() async {
     try {
-      final data = await supabase.from('courses_master').select('name');
+      final data = await supabase.from('courses_master').select('id, name').order('name');
       if (data != null) {
-        predefinedCourses = (data as List)
-            .map((e) => e['name'].toString())
-            .toList();
+        predefinedCourses = List<Map<String, dynamic>>.from(data as List);
         notifyListeners();
       }
     } catch (e) {
       debugPrint('Error fetching courses_master: $e');
-      // Keep hardcoded defaults if fetch fails
+    }
+  }
+
+  Future<void> addCourseMaster(String name) async {
+    try {
+      await supabase.from('courses_master').insert({'name': name});
+      await fetchPredefinedCourses();
+    } catch (e) {
+      debugPrint('Error adding course: $e');
+      rethrow;
+    }
+  }
+
+  Future<void> deleteCourseMaster(int id) async {
+    try {
+      await supabase.from('courses_master').delete().eq('id', id);
+      await fetchPredefinedCourses();
+    } catch (e) {
+      debugPrint('Error deleting course: $e');
     }
   }
 
@@ -470,6 +481,16 @@ class AppData extends ChangeNotifier {
       notifyListeners();
     } catch (e) {
       debugPrint('Error fetching students: $e');
+    }
+  }
+
+  Future<void> fetchInternalStudents() async {
+    try {
+      final data = await supabase.from('student_int').select().order('Enrollment No', ascending: true);
+      internalStudents = List<Map<String, dynamic>>.from(data);
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Error fetching internal students: $e');
     }
   }
 
@@ -756,6 +777,11 @@ class AppData extends ChangeNotifier {
         currentUserRole = UserRole.student;
         loggedEnrollNo = enrollNo;
         loggedName = preCheck['name']?.toString();
+        loggedPhone = preCheck['phone']?.toString();
+        loggedDob = preCheck['dob']?.toString();
+        loggedDepartment = preCheck['department']?.toString();
+        loggedYear = preCheck['year']?.toString();
+        loggedSemester = preCheck['semester']?.toString();
         saveSession();
         notifyListeners();
         return true;
@@ -773,6 +799,11 @@ class AppData extends ChangeNotifier {
           currentUserRole = UserRole.student;
           loggedEnrollNo = enrollNo;
           loggedName = preCheck['name']?.toString();
+          loggedPhone = preCheck['phone']?.toString();
+          loggedDob = preCheck['dob']?.toString();
+          loggedDepartment = preCheck['department']?.toString();
+          loggedYear = preCheck['year']?.toString();
+          loggedSemester = preCheck['semester']?.toString();
           saveSession();
           notifyListeners();
           return true;
@@ -1018,25 +1049,256 @@ class AppData extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> addCourseMaster(String name) async {
-    try {
-      await supabase.from('courses_master').insert({'name': name});
-      fetchPredefinedCourses(); // Refresh local list
-    } catch (e) {
-      debugPrint('Error adding course: $e');
-      rethrow;
-    }
-  }
-
   Future<void> enrollTeacher(String teacherId, String teacherName) async {
     try {
       await supabase.from('teacher_enrollments').insert({
         'teacher_id': teacherId,
         'teacher_name': teacherName,
+        'assigned_courses': [],
       });
     } catch (e) {
       debugPrint('Error enrolling teacher: $e');
       rethrow;
+    }
+  }
+
+  Future<bool> updateTeacherPrograms(String teacherId, List<String> courses) async {
+    try {
+      await supabase
+          .from('teacher_enrollments')
+          .update({'assigned_courses': courses})
+          .eq('teacher_id', teacherId);
+      return true;
+    } catch (e) {
+      debugPrint('Error updating teacher programs: $e');
+      return false;
+    }
+  }
+
+  bool isCourseAssignedToOther(String courseName, String currentTeacherId, List<Map<String, dynamic>> allEnrollments) {
+    for (var env in allEnrollments) {
+      if (env['teacher_id'] == currentTeacherId) continue;
+      List<dynamic> courses = env['assigned_courses'] ?? [];
+      if (courses.contains(courseName)) return true;
+    }
+    return false;
+  }
+
+  Future<void> addInternalStudent({
+    required String enrollNo,
+    required String name,
+    required String phone,
+    required String dob,
+    required String department,
+    required String year,
+    required String semester,
+  }) async {
+    try {
+      await supabase.from('student_int').insert({
+        'Enrollment No': int.tryParse(enrollNo) ?? -1,
+        'name': name,
+        'phone': phone,
+        'dob': dob,
+        'department': department,
+        'year': year,
+        'semester': semester,
+      });
+    } catch (e) {
+      debugPrint('Error adding internal student: $e');
+      rethrow;
+    }
+  }
+
+  Future<String?> fetchUserName(String userId) async {
+    try {
+      final idInt = int.tryParse(userId) ?? -1;
+
+      // Run all queries in parallel for maximum speed
+      final results = await Future.wait([
+        supabase.from('student_int').select('name').eq('Enrollment No', idInt).maybeSingle(),
+        supabase.from('student_registered_details').select('name').eq('enrollno', userId).maybeSingle(),
+        supabase.from('teacher_enrollments').select('teacher_name').eq('teacher_id', userId).maybeSingle(),
+        supabase.from('teacher_register_details').select('name').eq('teacher_id', userId).maybeSingle(),
+      ]);
+
+      // Return the first non-null result find
+      if (results[0] != null) return results[0]!['name']?.toString();
+      if (results[1] != null) return results[1]!['name']?.toString();
+      if (results[2] != null) return results[2]!['teacher_name']?.toString();
+      if (results[3] != null) return results[3]!['name']?.toString();
+
+      return null;
+    } catch (e) {
+      debugPrint('Error fetching user name: $e');
+      return null;
+    }
+  }
+
+  Future<Map<String, dynamic>?> verifyUserIdentity(String id, String name, String dob) async {
+    try {
+      // Check students
+      final studentRes = await supabase
+          .from('student_registered_details')
+          .select()
+          .eq('enrollno', id)
+          .eq('name', name)
+          .eq('dob', dob)
+          .maybeSingle();
+      if (studentRes != null) return {'table': 'student_registered_details', 'id_col': 'enrollno'};
+
+      // Check teachers
+      final teacherRes = await supabase
+          .from('teacher_register_details')
+          .select()
+          .eq('teacher_id', id)
+          .eq('name', name)
+          .eq('dob', dob)
+          .maybeSingle();
+      if (teacherRes != null) return {'table': 'teacher_register_details', 'id_col': 'teacher_id'};
+
+      return null;
+    } catch (e) {
+      debugPrint('Error verifying identity: $e');
+      return null;
+    }
+  }
+
+  Future<bool> updateUserPassword(String id, String table, String idCol, String newPass) async {
+    try {
+      await supabase.from(table).update({'password': newPass}).eq(idCol, id);
+      return true;
+    } catch (e) {
+      debugPrint('Error updating password: $e');
+      return false;
+    }
+  }
+
+  Future<Map<String, List<String>>> fetchMcqInstruction() async {
+    try {
+      final res = await supabase.from('mcq_settings').select().eq('id', 1).maybeSingle();
+      if (res != null) {
+        List<String> dos = (res['dos'] as List?)?.map((e) => e.toString()).toList() ?? [];
+        List<String> donts = (res['donts'] as List?)?.map((e) => e.toString()).toList() ?? [];
+        return {'dos': dos, 'donts': donts};
+      }
+    } catch (e) {
+      debugPrint('Error fetching mcq instruction: $e');
+    }
+    return {'dos': [], 'donts': []};
+  }
+
+  Future<bool> updateMcqInstruction({required List<String> dos, required List<String> donts}) async {
+    try {
+      await supabase.from('mcq_settings').upsert({
+        'id': 1,
+        'dos': dos,
+        'donts': donts,
+        'updated_at': DateTime.now().toIso8601String(),
+      });
+      return true;
+    } on PostgrestException catch (e) {
+      debugPrint('Supabase MCQ instruction update error: ${e.message} - ${e.details}');
+      return false;
+    } catch (e) {
+      debugPrint('Error updating mcq instruction: $e');
+      return false;
+    }
+  }
+
+  Future<void> refreshCurrentUserData() async {
+    if (currentUserRole == null) return;
+    try {
+      String table;
+      String idCol;
+      dynamic idVal;
+
+      if (currentUserRole == UserRole.student) {
+        table = 'student_registered_details';
+        idCol = 'enrollno';
+        idVal = loggedEnrollNo;
+        if (idVal == null) {
+           // Fallback check
+           return;
+        }
+      } else if (currentUserRole == UserRole.teacher) {
+        table = 'teacher_register_details';
+        idCol = 'teacher_id';
+        idVal = loggedTeacherId;
+        if (idVal == null) return;
+      } else {
+        // Admin
+        return;
+      }
+
+      final res = await supabase.from(table).select().eq(idCol, idVal).maybeSingle();
+      if (res != null) {
+        currentUserData = Map<String, dynamic>.from(res);
+        
+        // Sync individuals for UI compatibility
+        loggedName = res['name']?.toString();
+        loggedPhone = res['phone']?.toString();
+        loggedDepartment = res['department']?.toString();
+        loggedYear = res['year']?.toString();
+        loggedSemester = res['semester']?.toString();
+        
+        if (currentUserRole == UserRole.teacher) {
+          loggedDesignation = res['designation']?.toString();
+        }
+
+        saveSession();
+        notifyListeners();
+      }
+    } catch (e) {
+      debugPrint('Error refreshing user data: $e');
+    }
+  }
+
+  // Course Papers Management
+  Future<List<Map<String, dynamic>>> fetchPapersForCourse(int courseId) async {
+    try {
+      final data = await supabase
+          .from('course_papers')
+          .select()
+          .eq('course_id', courseId)
+          .order('paper_name', ascending: true);
+      return List<Map<String, dynamic>>.from(data as List);
+    } catch (e) {
+      debugPrint('Error fetching papers: $e');
+      return [];
+    }
+  }
+
+  Future<bool> addPaperToCourse({
+    required int courseId,
+    required String paperName,
+    required String paperId,
+  }) async {
+    try {
+      await supabase.from('course_papers').insert({
+        'course_id': courseId,
+        'paper_name': paperName,
+        'paper_id': paperId,
+      });
+      return true;
+    } on PostgrestException catch (e) {
+      debugPrint('Supabase add paper error: ${e.message} - ${e.details}');
+      return false;
+    } catch (e) {
+      debugPrint('Error adding paper: $e');
+      return false;
+    }
+  }
+
+  Future<bool> deletePaper(int id) async {
+    try {
+      await supabase.from('course_papers').delete().eq('id', id);
+      return true;
+    } on PostgrestException catch (e) {
+      debugPrint('Supabase delete paper error: ${e.message}');
+      return false;
+    } catch (e) {
+      debugPrint('Error deleting paper: $e');
+      return false;
     }
   }
 
@@ -1047,16 +1309,6 @@ class AppData extends ChangeNotifier {
     } catch (e) {
       debugPrint('Error fetching teachers: $e');
       return [];
-    }
-  }
-
-  Future<void> deleteCourseMaster(String name) async {
-    try {
-      await supabase.from('courses_master').delete().eq('name', name);
-      fetchPredefinedCourses();
-    } catch (e) {
-      debugPrint('Error deleting course: $e');
-      rethrow;
     }
   }
 
@@ -1619,6 +1871,11 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
                   'Manage Students',
                   NavPage.manageStudents,
                 ),
+                _buildNavItem(
+                  Icons.school_rounded,
+                  'Student details',
+                  NavPage.studentDetails,
+                ),
               ] else ...[
                 _buildNavItem(
                   Icons.grid_view_rounded,
@@ -1782,6 +2039,8 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
           case NavPage.manageTeachers:
             return const ManageTeachersView();
           case NavPage.manageStudents:
+            return const ManageStudentsView();
+          case NavPage.studentDetails:
             return const ManageStudentsView();
         }
       },
@@ -2778,55 +3037,72 @@ class _McqCentralViewState extends State<McqCentralView> {
 // ---------------------------------------------------------
 // Profile View (Highly detailed and stunning)
 // ---------------------------------------------------------
-class ProfileView extends StatelessWidget {
+class ProfileView extends StatefulWidget {
   const ProfileView({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    final role = AppData().currentUserRole;
-    final isTeacher = role == UserRole.teacher;
-    final screenWidth = MediaQuery.of(context).size.width;
-    final isMobile = screenWidth < 900;
+  State<ProfileView> createState() => _ProfileViewState();
+}
 
-    return SingleChildScrollView(
-      padding: EdgeInsets.all(isMobile ? 16 : 40),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _buildProfileHeader(context, isTeacher, isMobile),
-          const SizedBox(height: 32),
-          isMobile
-              ? Column(
-                  children: [
-                    _buildPersonalAndAcademicInfo(isTeacher),
-                    const SizedBox(height: 24),
-                    _buildAccountStatusCard(),
-                    const SizedBox(height: 24),
-                    _buildQuickActionsCard(context),
-                  ],
-                )
-              : Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      flex: 2,
-                      child: _buildPersonalAndAcademicInfo(isTeacher),
+class _ProfileViewState extends State<ProfileView> {
+  @override
+  void initState() {
+    super.initState();
+    // Refresh user data from database when profile page is opened
+    Future.microtask(() => AppData().refreshCurrentUserData());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: AppData(),
+      builder: (context, _) {
+        final role = AppData().currentUserRole;
+        final isTeacher = role == UserRole.teacher;
+        final screenWidth = MediaQuery.of(context).size.width;
+        final isMobile = screenWidth < 900;
+
+        return SingleChildScrollView(
+          padding: EdgeInsets.all(isMobile ? 16 : 40),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildProfileHeader(context, isTeacher, isMobile),
+              const SizedBox(height: 32),
+              isMobile
+                  ? Column(
+                      children: [
+                        _buildPersonalAndAcademicInfo(isTeacher),
+                        const SizedBox(height: 24),
+                        _buildAccountStatusCard(),
+                        const SizedBox(height: 24),
+                        _buildQuickActionsCard(context),
+                      ],
+                    )
+                  : Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          flex: 2,
+                          child: _buildPersonalAndAcademicInfo(isTeacher),
+                        ),
+                        const SizedBox(width: 32),
+                        Expanded(
+                          flex: 1,
+                          child: Column(
+                            children: [
+                              _buildAccountStatusCard(),
+                              const SizedBox(height: 24),
+                              _buildQuickActionsCard(context),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
-                    const SizedBox(width: 32),
-                    Expanded(
-                      flex: 1,
-                      child: Column(
-                        children: [
-                          _buildAccountStatusCard(),
-                          const SizedBox(height: 24),
-                          _buildQuickActionsCard(context),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-        ],
-      ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -4277,10 +4553,11 @@ class CoursesView extends StatelessWidget {
                       ),
                     ),
                   ),
-                  items: AppData().predefinedCourses.map((String value) {
+                  items: AppData().predefinedCourses.map((Map<String, dynamic> course) {
+                    final name = course['name'].toString();
                     return DropdownMenuItem<String>(
-                      value: value,
-                      child: Text(value, overflow: TextOverflow.ellipsis),
+                      value: name,
+                      child: Text(name, overflow: TextOverflow.ellipsis),
                     );
                   }).toList(),
                   onChanged: (newValue) {
@@ -6343,6 +6620,7 @@ class _AssignmentInteractionScreenState
   int _tabSwitchCount = 0;
   int _backPressCount = 0;
   bool _isNavigatingOut = false;
+  Set<int> _visitedMcqIndices = {};
 
   bool _isWarningDialogShown = false;
   bool _hasTabSwitchPending = false;
@@ -6352,12 +6630,27 @@ class _AssignmentInteractionScreenState
   List<dynamic> _shuffledMcqData = [];
 
   Timer? _clockTimer;
+  List<String> _dos = [];
+  List<String> _donts = [];
+  bool _isLoadingInstructions = true;
+
+  void _loadGlobalInstruction() async {
+    final Map<String, List<String>> result = await AppData().fetchMcqInstruction();
+    if (mounted) {
+      setState(() {
+        _dos = result['dos'] ?? [];
+        _donts = result['donts'] ?? [];
+        _isLoadingInstructions = false;
+      });
+    }
+  }
 
   get stdId => null;
 
   @override
   void initState() {
     super.initState();
+    _loadGlobalInstruction();
     WidgetsBinding.instance.addObserver(this);
     bool isStudent = AppData().currentUserRole == UserRole.student;
     bool isTurnedIn = widget.assignment['isDone'] ?? false;
@@ -6561,6 +6854,7 @@ class _AssignmentInteractionScreenState
         : (widget.assignment['mcqData'] as List<dynamic>);
 
     setState(() {
+      _visitedMcqIndices.add(currentMcqIndex);
       if (currentMcqIndex < mcqData.length - 1) {
         currentMcqIndex++;
         _startMcqTimer();
@@ -6569,6 +6863,20 @@ class _AssignmentInteractionScreenState
         _submitMcq();
       }
     });
+  }
+
+  void _jumpToQuestion(int index) {
+    List<dynamic> mcqData = _shuffledMcqData.isNotEmpty
+        ? _shuffledMcqData
+        : (widget.assignment['mcqData'] as List<dynamic>);
+
+    if (index >= 0 && index < mcqData.length) {
+      setState(() {
+        _visitedMcqIndices.add(currentMcqIndex);
+        currentMcqIndex = index;
+        _startMcqTimer();
+      });
+    }
   }
 
   void _shuffleQuestionsAndOptions() {
@@ -7670,7 +7978,6 @@ class _AssignmentInteractionScreenState
                       ),
                     ],
                   ),
-                  const SizedBox(height: 48),
                   const Text(
                     'Examination Instructions',
                     style: TextStyle(
@@ -7680,25 +7987,72 @@ class _AssignmentInteractionScreenState
                     ),
                   ),
                   const SizedBox(height: 24),
-                  _buildInstructionItem(
-                    Icons.check_circle_outline,
-                    'Do: Ensure a stable internet connection before starting.',
-                    Colors.green,
+                  if (_isLoadingInstructions)
+                    const Center(child: CircularProgressIndicator())
+                  else ...[
+                    // Do's
+                    ..._dos.map((point) => Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Icon(Icons.check_circle_rounded, color: Colors.green, size: 20),
+                          const SizedBox(width: 12),
+                          Expanded(child: Text('Do: $point', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500))),
+                        ],
+                      ),
+                    )),
+                    // Dont's
+                    ..._donts.map((point) => Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Icon(Icons.cancel_rounded, color: Colors.red, size: 20),
+                          const SizedBox(width: 12),
+                          Expanded(child: Text('Don''t: $point', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500))),
+                        ],
+                      ),
+                    )),
+                  ],
+                  if (!_isLoadingInstructions && _dos.isEmpty && _donts.isEmpty)
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(24),
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade50,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: Colors.grey.shade200),
+                      ),
+                      child: Text(
+                        'Please follow standard examination rules.',
+                        style: TextStyle(
+                          fontSize: 15,
+                          color: Colors.grey.shade800,
+                          height: 1.6,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                  const SizedBox(height: 32),
+                  const Text(
+                    'Standard Rules',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF2D3436),
+                    ),
                   ),
-                  _buildInstructionItem(
-                    Icons.check_circle_outline,
-                    'Do: Read each question carefully before selecting an answer.',
-                    Colors.green,
-                  ),
+                  const SizedBox(height: 16),
                   _buildInstructionItem(
                     Icons.highlight_off_rounded,
-                    'Don\'t: Switch tabs or minimize the test window (Security Violation).',
+                    'Do not switch tabs or minimize the window.',
                     Colors.red,
                   ),
                   _buildInstructionItem(
-                    Icons.highlight_off_rounded,
-                    'Don\'t: Attempt to go back to the previous page during the test.',
-                    Colors.red,
+                    Icons.timer_outlined,
+                    'Each question has a 30-second time limit.',
+                    Colors.orange,
                   ),
                   const SizedBox(height: 48),
                   Container(
@@ -7766,414 +8120,391 @@ class _AssignmentInteractionScreenState
       );
     }
 
-    var q = mcqData[currentMcqIndex];
-    double progress = (currentMcqIndex + 1) / mcqData.length;
+    if (mcqData.isEmpty) {
+      return const Center(child: Text('No questions available for this test.'));
+    }
 
-    return Stack(
-      children: [
-        Container(
-          color: Colors.white,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Top Navigation Header
-              Container(
-                padding: EdgeInsets.symmetric(
-                  horizontal: isMobile ? 16 : 40,
-                  vertical: isMobile ? 16 : 24,
-                ),
-                decoration: BoxDecoration(
-                  border: Border(
-                    bottom: BorderSide(color: Colors.grey.shade200),
-                  ),
-                ),
-                child: Flex(
-                  direction: isMobile ? Axis.vertical : Axis.horizontal,
-                  crossAxisAlignment: isMobile
-                      ? CrossAxisAlignment.start
-                      : CrossAxisAlignment.center,
-                  children: [
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          widget.assignment['title'],
-                          style: GoogleFonts.outfit(
-                            fontWeight: FontWeight.bold,
-                            fontSize: isMobile ? 18 : 20,
-                            color: const Color(0xFF4A4A68),
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          'Test In Progress',
-                          style: TextStyle(
-                            color: Colors.grey.shade500,
-                            fontWeight: FontWeight.w600,
-                            fontSize: isMobile ? 12 : 14,
-                          ),
-                        ),
-                      ],
-                    ),
-                    if (isMobile)
-                      const SizedBox(height: 20)
-                    else
-                      const Spacer(),
-                    if (!isMobile)
-                      Expanded(
-                        flex: 2,
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 40),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                '${(progress * 100).toInt()}% Completed',
-                                style: TextStyle(
-                                  color: widget.classColor,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 12,
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              LinearProgressIndicator(
-                                value: progress,
-                                backgroundColor: widget.classColor.withAlpha(
-                                  20,
-                                ),
-                                valueColor: AlwaysStoppedAnimation<Color>(
-                                  widget.classColor,
-                                ),
-                                minHeight: 8,
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    Wrap(
-                      spacing: 20,
-                      runSpacing: 12,
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      children: [
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.timer_outlined,
-                              color: widget.classColor.withAlpha(180),
-                              size: 22,
-                            ),
-                            const SizedBox(width: 8),
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  '00:${_mcqTimeLeft.toString().padLeft(2, '0')}',
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    color: Color(0xFF4A4A68),
-                                    fontSize: 13,
-                                  ),
-                                ),
-                                Text(
-                                  'Question',
-                                  style: TextStyle(
-                                    color: Colors.grey.shade400,
-                                    fontSize: 10,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                        Container(
-                          width: 1,
-                          height: 24,
-                          color: Colors.grey.shade200,
-                        ),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.access_time_filled,
-                              color: widget.classColor.withAlpha(180),
-                              size: 22,
-                            ),
-                            const SizedBox(width: 8),
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  _getOverallTimeLeft(),
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    color:
-                                        (widget.assignment['dueDateTime'] !=
-                                                null &&
-                                            widget.assignment['dueDateTime']
-                                                    .difference(DateTime.now())
-                                                    .inMinutes <
-                                                5)
-                                        ? Colors.red
-                                        : const Color(0xFF4A4A68),
-                                    fontSize: 13,
-                                  ),
-                                ),
-                                Text(
-                                  'Test Ends In',
-                                  style: TextStyle(
-                                    color: Colors.grey.shade400,
-                                    fontSize: 10,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
+    final q = mcqData[currentMcqIndex];
+    final progress = (currentMcqIndex + 1) / mcqData.length;
 
-              Expanded(
-                child: SingleChildScrollView(
+    return Container(
+      color: const Color(0xFFF8F9FA),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Main Question Area
+          Expanded(
+            flex: 3,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Top Navigation Header
+                Container(
                   padding: EdgeInsets.symmetric(
-                    vertical: isMobile ? 24 : 16,
-                    horizontal: isMobile ? 16 : 0,
+                    horizontal: isMobile ? 16 : 40,
+                    vertical: isMobile ? 16 : 24,
                   ),
-                  child: Center(
-                    child: SizedBox(
-                      width: isMobile ? double.infinity : 800,
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
+                  decoration: const BoxDecoration(
+                    color: Colors.white,
+                    border: Border(bottom: BorderSide(color: Color(0xFFE9ECEF))),
+                  ),
+                  child: Row(
+                    children: [
+                      Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            'Question ${currentMcqIndex + 1}',
-                            style: TextStyle(
+                            widget.assignment['title'],
+                            style: GoogleFonts.outfit(
                               fontWeight: FontWeight.bold,
-                              fontSize: isMobile ? 16 : 18,
-                              color: Colors.grey.shade500,
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          Text(
-                            q['question'],
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: isMobile ? 20 : 24,
-                              height: 1.5,
+                              fontSize: isMobile ? 18 : 20,
                               color: const Color(0xFF4A4A68),
                             ),
                           ),
-                          const SizedBox(height: 32),
-                          ...List.generate((q['options'] as List).length, (
-                            optIndex,
-                          ) {
-                            bool isSelected =
-                                mcqAnswers[currentMcqIndex] == optIndex;
-                            String displayOptionText = q['options'][optIndex]
-                                .toString();
-
-                            return Padding(
-                              padding: const EdgeInsets.only(bottom: 12),
-                              child: InkWell(
-                                onTap: () {
-                                  setState(() {
-                                    mcqAnswers[currentMcqIndex] = optIndex;
-                                  });
-                                },
-                                borderRadius: BorderRadius.circular(16),
-                                child: Container(
-                                  padding: EdgeInsets.symmetric(
-                                    horizontal: 24,
-                                    vertical: isMobile ? 16 : 20,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: isSelected
-                                        ? widget.classColor.withAlpha(20)
-                                        : Colors.white,
-                                    borderRadius: BorderRadius.circular(16),
-                                    border: Border.all(
-                                      color: isSelected
-                                          ? widget.classColor
-                                          : Colors.grey.shade200,
-                                      width: isSelected ? 2 : 1,
-                                    ),
-                                    boxShadow: isSelected
-                                        ? [
-                                            BoxShadow(
-                                              color: widget.classColor
-                                                  .withAlpha(15),
-                                              blurRadius: 24,
-                                              offset: const Offset(0, 4),
-                                            ),
-                                          ]
-                                        : [],
-                                  ),
-                                  child: Row(
-                                    mainAxisAlignment:
-                                        MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      Expanded(
-                                        child: Text(
-                                          displayOptionText,
-                                          style: TextStyle(
-                                            fontSize: isMobile ? 16 : 18,
-                                            fontWeight: isSelected
-                                                ? FontWeight.bold
-                                                : FontWeight.w500,
-                                            color: isSelected
-                                                ? const Color(0xFF4A4A68)
-                                                : Colors.grey.shade600,
-                                          ),
-                                        ),
-                                      ),
-                                      Container(
-                                        width: 24,
-                                        height: 24,
-                                        decoration: BoxDecoration(
-                                          shape: BoxShape.circle,
-                                          border: Border.all(
-                                            color: isSelected
-                                                ? widget.classColor
-                                                : Colors.black87,
-                                            width: 2,
-                                          ),
-                                        ),
-                                        child: isSelected
-                                            ? Center(
-                                                child: Container(
-                                                  width: 12,
-                                                  height: 12,
-                                                  decoration: BoxDecoration(
-                                                    shape: BoxShape.circle,
-                                                    color: widget.classColor,
-                                                  ),
-                                                ),
-                                              )
-                                            : null,
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            );
-                          }),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Final Examination',
+                            style: TextStyle(
+                              color: Colors.grey.shade500,
+                              fontWeight: FontWeight.w600,
+                              fontSize: isMobile ? 12 : 14,
+                            ),
+                          ),
                         ],
+                      ),
+                      const Spacer(),
+                      _buildTimerBadge(
+                        Icons.timer_outlined,
+                        '00:${_mcqTimeLeft.toString().padLeft(2, '0')}',
+                        'Timer',
+                        Colors.orange,
+                      ),
+                      const SizedBox(width: 16),
+                      if (!isMobile)
+                        _buildTimerBadge(
+                          Icons.schedule,
+                          _getOverallTimeLeft(),
+                          'Ends In',
+                          widget.classColor,
+                        ),
+                    ],
+                  ),
+                ),
+
+                // Question Content
+                Expanded(
+                  child: SingleChildScrollView(
+                    padding: EdgeInsets.all(isMobile ? 16 : 40),
+                    child: Center(
+                      child: Container(
+                        constraints: const BoxConstraints(maxWidth: 800),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Question ${currentMcqIndex + 1} of ${mcqData.length}',
+                              style: GoogleFonts.outfit(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 18,
+                                color: widget.classColor,
+                              ),
+                            ),
+                            const SizedBox(height: 24),
+                            Text(
+                              q['question'],
+                              style: GoogleFonts.outfit(
+                                fontWeight: FontWeight.bold,
+                                fontSize: isMobile ? 22 : 28,
+                                height: 1.4,
+                                color: const Color(0xFF1A1A2E),
+                              ),
+                            ),
+                            const SizedBox(height: 40),
+                            ...List.generate((q['options'] as List).length, (idx) {
+                              bool isSelected = mcqAnswers[currentMcqIndex] == idx;
+                              return _buildOptionInteraction(idx, q['options'][idx].toString(), isSelected, isMobile);
+                            }),
+                          ],
+                        ),
                       ),
                     ),
                   ),
                 ),
-              ),
-              Container(
-                padding: EdgeInsets.symmetric(
-                  horizontal: isMobile ? 16 : 40,
-                  vertical: isMobile ? 24 : 32,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  border: Border(top: BorderSide(color: Colors.grey.shade200)),
-                ),
-                child: Flex(
-                  direction: isMobile ? Axis.vertical : Axis.horizontal,
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    // Info text about auto-submit at the end
-                    if (currentMcqIndex == mcqData.length - 1 &&
-                        _mcqTimeLeft >= 0)
-                      Padding(
-                        padding: EdgeInsets.only(bottom: isMobile ? 20 : 0),
-                        child: Text(
-                          'Auto-submitting in $_mcqTimeLeft s...',
-                          style: TextStyle(
-                            color: Colors.grey.shade600,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
-                          ),
-                        ),
-                      )
-                    else if (!isMobile)
-                      const SizedBox(),
 
-                    // Control Buttons
-                    Row(
-                      mainAxisAlignment: isMobile
-                          ? MainAxisAlignment.spaceBetween
-                          : MainAxisAlignment.end,
-                      children: [
-                        // Skip Button
-                        Expanded(
-                          flex: isMobile ? 1 : 0,
-                          child: OutlinedButton(
-                            onPressed: () {
-                              setState(() {
-                                mcqAnswers.remove(currentMcqIndex);
-                              });
-                              _moveToNextQuestionOrSubmit();
-                            },
-                            style: OutlinedButton.styleFrom(
-                              padding: EdgeInsets.symmetric(
-                                horizontal: isMobile ? 12 : 24,
-                                vertical: isMobile ? 16 : 20,
-                              ),
-                              side: const BorderSide(color: Colors.orange),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                            ),
-                            child: const Text(
-                              'Skip',
-                              style: TextStyle(
-                                color: Colors.orange,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
+                // Footer Controls
+                Container(
+                  padding: EdgeInsets.symmetric(horizontal: isMobile ? 16 : 40, vertical: 20),
+                  decoration: const BoxDecoration(
+                    color: Colors.white,
+                    border: Border(top: BorderSide(color: Color(0xFFE9ECEF))),
+                  ),
+                  child: Row(
+                    children: [
+                      if (currentMcqIndex > 0)
+                        OutlinedButton(
+                          onPressed: () => _jumpToQuestion(currentMcqIndex - 1),
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                           ),
+                          child: const Text('Previous'),
                         ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          flex: isMobile ? 2 : 0,
-                          child: ElevatedButton(
-                            onPressed: () {
-                              _moveToNextQuestionOrSubmit();
-                            },
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: widget.classColor,
-                              foregroundColor: Colors.white,
-                              padding: EdgeInsets.symmetric(
-                                horizontal: isMobile ? 20 : 40,
-                                vertical: isMobile ? 16 : 20,
-                              ),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              elevation: 0,
-                            ),
-                            child: Text(
-                              currentMcqIndex == mcqData.length - 1
-                                  ? 'Finish & Submit'
-                                  : 'Next Question',
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
+                      const Spacer(),
+                      TextButton(
+                        onPressed: () {
+                          setState(() {
+                            mcqAnswers.remove(currentMcqIndex);
+                            _visitedMcqIndices.add(currentMcqIndex);
+                          });
+                          _moveToNextQuestionOrSubmit();
+                        },
+                        child: const Text('Skip', style: TextStyle(color: Colors.grey)),
+                      ),
+                      const SizedBox(width: 16),
+                      ElevatedButton(
+                        onPressed: () => _moveToNextQuestionOrSubmit(),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: widget.classColor,
+                          padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                         ),
-                      ],
-                    ),
-                  ],
+                        child: Text(
+                          currentMcqIndex == mcqData.length - 1 ? 'Finish & Submit' : 'Next Question',
+                          style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
+              ],
+            ),
+          ),
+
+          // Question Navigator (Hidden on Mobile)
+          if (!isMobile)
+            Container(
+              width: 320,
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                border: Border(left: BorderSide(color: Color(0xFFE9ECEF))),
+              ),
+              child: _buildQuestionNavigatorPanel(mcqData),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildQuestionNavigatorPanel(List<dynamic> mcqData) {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(24),
+          child: Row(
+            children: [
+              const Icon(Icons.apps_rounded, color: Color(0xFF4A4A68)),
+              const SizedBox(width: 12),
+              Text(
+                'Navigator',
+                style: GoogleFonts.outfit(fontWeight: FontWeight.bold, fontSize: 18),
               ),
             ],
           ),
         ),
+        const Divider(height: 1),
+        Expanded(
+          child: GridView.builder(
+            padding: const EdgeInsets.all(20),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 5,
+              mainAxisSpacing: 10,
+              crossAxisSpacing: 10,
+            ),
+            itemCount: mcqData.length,
+            itemBuilder: (context, index) {
+              final isCurrent = currentMcqIndex == index;
+              final isAnswered = mcqAnswers.containsKey(index);
+              final isSkipped = _visitedMcqIndices.contains(index) && !isAnswered;
+
+              Color color = Colors.grey.shade100;
+              Color textCol = Colors.grey.shade600;
+
+              if (isCurrent) {
+                color = const Color(0xFF007BFF);
+                textCol = Colors.white;
+              } else if (isAnswered) {
+                color = const Color(0xFF28A745);
+                textCol = Colors.white;
+              } else if (isSkipped) {
+                color = const Color(0xFFDC3545);
+                textCol = Colors.white;
+              }
+
+              return InkWell(
+                onTap: () => _jumpToQuestion(index),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: color,
+                    borderRadius: BorderRadius.circular(10),
+                    boxShadow: isCurrent ? [BoxShadow(color: color.withAlpha(50), blurRadius: 10)] : [],
+                  ),
+                  child: Center(
+                    child: Text(
+                      '${index + 1}',
+                      style: TextStyle(fontWeight: FontWeight.bold, color: textCol),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        const Divider(height: 1),
+        Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            children: [
+              _navigatorLegend(const Color(0xFF007BFF), 'Active Question'),
+              const SizedBox(height: 10),
+              _navigatorLegend(const Color(0xFF28A745), 'Answered'),
+              const SizedBox(height: 10),
+              _navigatorLegend(const Color(0xFFDC3545), 'Visited & Skipped'),
+              const SizedBox(height: 10),
+              _navigatorLegend(Colors.grey.shade100, 'Not Visited', hasBorder: true),
+            ],
+          ),
+        ),
       ],
+    );
+  }
+
+  Widget _navigatorLegend(Color col, String label, {bool hasBorder = false}) {
+    return Row(
+      children: [
+        Container(
+          width: 14,
+          height: 14,
+          decoration: BoxDecoration(
+            color: col,
+            borderRadius: BorderRadius.circular(4),
+            border: hasBorder ? Border.all(color: Colors.grey.shade300) : null,
+          ),
+        ),
+        const SizedBox(width: 12),
+        Text(label, style: TextStyle(fontSize: 12, color: Colors.grey.shade700, fontWeight: FontWeight.w500)),
+      ],
+    );
+  }
+
+  Widget _buildOptionInteraction(int idx, String text, bool isSelected, bool isMobile) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: () {
+            setState(() {
+              _visitedMcqIndices.add(currentMcqIndex);
+              mcqAnswers[currentMcqIndex] = idx;
+            });
+          },
+          borderRadius: BorderRadius.circular(16),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            padding: EdgeInsets.all(isMobile ? 16 : 24),
+            decoration: BoxDecoration(
+              color: isSelected ? widget.classColor.withAlpha(15) : Colors.white,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: isSelected ? widget.classColor : Colors.grey.shade200,
+                width: isSelected ? 2.5 : 1,
+              ),
+              boxShadow: isSelected
+                  ? [
+                      BoxShadow(
+                        color: widget.classColor.withAlpha(30),
+                        blurRadius: 20,
+                        offset: const Offset(0, 4),
+                      ),
+                    ]
+                  : [],
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    color: isSelected ? widget.classColor : Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(12),
+                    boxShadow: isSelected
+                        ? [BoxShadow(color: widget.classColor.withAlpha(40), blurRadius: 8)]
+                        : [],
+                  ),
+                  child: Center(
+                    child: Text(
+                      String.fromCharCode(65 + idx),
+                      style: TextStyle(
+                        color: isSelected ? Colors.white : Colors.grey.shade700,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 17,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 20),
+                Expanded(
+                  child: Text(
+                    text,
+                    style: GoogleFonts.outfit(
+                      fontSize: isMobile ? 16 : 18,
+                      fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                      color: isSelected ? widget.classColor : const Color(0xFF4A4A68),
+                    ),
+                  ),
+                ),
+                if (isSelected)
+                  Icon(Icons.check_circle, color: widget.classColor, size: 24),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTimerBadge(IconData icon, String val, String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: color.withAlpha(10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withAlpha(30)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: color, size: 20),
+          const SizedBox(width: 12),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                val,
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: color,
+                  fontSize: 16,
+                ),
+              ),
+              Text(
+                label,
+                style: TextStyle(color: Colors.grey.shade500, fontSize: 10),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
