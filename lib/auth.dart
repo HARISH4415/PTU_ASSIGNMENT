@@ -17,6 +17,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final TextEditingController _idController = TextEditingController();
   final TextEditingController _passController = TextEditingController();
   bool _isPasswordVisible = false;
+  bool _isLoading = false;
   String? _studentName;
   Timer? _debounce;
 
@@ -62,28 +63,40 @@ class _LoginScreenState extends State<LoginScreen> {
       return;
     }
 
+    setState(() => _isLoading = true);
     AppData().loginErrorMessage = null; 
-    bool success = await AppData().loginStudent(id, pass);
     
-    if (!success) {
-      // If not a student, try as a teacher
-      success = await AppData().loginTeacher(id, pass);
-    }
+    try {
+      bool success = await AppData().loginStudent(id, pass);
+      
+      if (!success) {
+        // If not a student, try as a teacher
+        success = await AppData().loginTeacher(id, pass);
+      }
 
-    if (!success) {
-      // If not a teacher, try as an admin
-      success = await AppData().loginAdmin(id, pass);
-    }
+      if (!success) {
+        // If not a teacher, try as an admin
+        success = await AppData().loginAdmin(id, pass);
+      }
 
-    if (success) {
-      if (!mounted) return;
-      // The PTU_PORTALApp in main.dart handles the routing automatically via AnimatedBuilder
-      // We don't need to push manually here.
-    } else {
-      String msg = AppData().loginErrorMessage ?? 'Invalid credentials or user not found';
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(msg)),
-      );
+      if (success) {
+        if (!mounted) return;
+        // Navigation is handled automatically by the root AnimatedBuilder in main.dart
+      } else {
+        if (!mounted) return;
+        String msg = AppData().loginErrorMessage ?? 'Check the credentials';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(msg),
+            backgroundColor: Colors.redAccent,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 
@@ -230,10 +243,20 @@ class _LoginScreenState extends State<LoginScreen> {
                       borderRadius: BorderRadius.circular(12),
                     ),
                   ),
-                  child: const Text(
-                    'Sign In',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                  ),
+                  child: _isLoading
+                      ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(
+                            color: Colors.white,
+                            strokeWidth: 2,
+                          ),
+                        )
+                      : const Text(
+                          'Sign In',
+                          style: TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.bold),
+                        ),
                 ),
               ],
             ),

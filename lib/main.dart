@@ -7,14 +7,17 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:dotted_border/dotted_border.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:ptu/admin_views.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:excel/excel.dart' as ex;
+import 'package:csv/csv.dart';
 import 'dart:typed_data';
 import 'package:http/http.dart' as http;
+import 'package:intl/intl.dart';
 import 'auth.dart';
-import 'admin_views.dart';
+import 'paper_views.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,7 +32,7 @@ Future<void> main() async {
     debugPrint('Supabase init failed. Please update the URL and Anon Key.');
   }
 
-  runApp(const PTU_PORTALApp());
+  runApp(const EduPortalApp());
 }
 
 final supabase = Supabase.instance.client;
@@ -117,16 +120,20 @@ class AppData extends ChangeNotifier {
       loggedSection = prefs.getString('loggedSection');
       isRegistrationPending = prefs.getBool('isRegistrationPending') ?? false;
       teacherCustomCourses = prefs.getStringList('teacherCustomCourses') ?? [];
-      
+
       String? savedPage = prefs.getString('currentPage');
       if (savedPage != null) {
         currentPage = NavPage.values.firstWhere(
           (e) => e.name == savedPage,
-          orElse: () => currentUserRole == UserRole.admin ? NavPage.adminDashboard : NavPage.dashboard,
+          orElse: () => currentUserRole == UserRole.admin
+              ? NavPage.adminDashboard
+              : NavPage.dashboard,
         );
       } else {
         // Fallback for first time or missing data
-        currentPage = currentUserRole == UserRole.admin ? NavPage.adminDashboard : NavPage.dashboard;
+        currentPage = currentUserRole == UserRole.admin
+            ? NavPage.adminDashboard
+            : NavPage.dashboard;
       }
 
       notifyListeners();
@@ -142,12 +149,12 @@ class AppData extends ChangeNotifier {
     if (loggedTeacherId == null) return;
     try {
       final res = await supabase
-          .from('teacher_subject_mapping')
-          .select('subjects')
+          .from('teacher_enrollments')
+          .select('assigned_courses')
           .eq('teacher_id', loggedTeacherId!)
           .maybeSingle();
-      if (res != null && res['subjects'] != null) {
-        teacherCustomCourses = List<String>.from(res['subjects']);
+      if (res != null && res['assigned_courses'] != null) {
+        teacherCustomCourses = List<String>.from(res['assigned_courses']);
         saveSession();
         notifyListeners();
       }
@@ -159,6 +166,7 @@ class AppData extends ChangeNotifier {
   UserRole currentUserRole = UserRole.student;
   NavPage currentPage = NavPage.dashboard;
   String? activeMeetingCode;
+  bool isAssignmentsLoading = false;
 
   bool isLoggedIn = false;
   String? loggedEmail;
@@ -202,7 +210,10 @@ class AppData extends ChangeNotifier {
 
   Future<void> fetchPredefinedCourses() async {
     try {
-      final data = await supabase.from('courses_master').select('id, name').order('name');
+      final data = await supabase
+          .from('courses_master')
+          .select('id, name')
+          .order('name');
       if (data != null) {
         predefinedCourses = List<Map<String, dynamic>>.from(data as List);
         notifyListeners();
@@ -213,13 +224,19 @@ class AppData extends ChangeNotifier {
   }
 
   Future<void> addCourseMaster(String name) async {
-    try {
-      await supabase.from('courses_master').insert({'name': name});
-      await fetchPredefinedCourses();
-    } catch (e) {
-      debugPrint('Error adding course: $e');
-      rethrow;
+    await supabase.from('courses_master').insert({'name': name});
+    await fetchActiveDepartments(); // Refresh predefinedCourses
+    await fetchPredefinedCourses(); // Refresh predefinedCourses list too
+  }
+
+  // Helper to find numeric course ID by name
+  int? getCourseIdByName(String name) {
+    for (var c in predefinedCourses) {
+      if (c['name'].toString().toLowerCase() == name.toLowerCase()) {
+        return c['id'] as int?;
+      }
     }
+    return null;
   }
 
   Future<void> deleteCourseMaster(int id) async {
@@ -278,12 +295,10 @@ class AppData extends ChangeNotifier {
     if (!isLoggedIn) return [];
 
     if (currentUserRole == UserRole.teacher) {
-      List<String> myDepts = [];
-      if (loggedDepartment != null && loggedDepartment!.isNotEmpty) {
-        myDepts.add(loggedDepartment!);
-      }
-      myDepts.addAll(teacherCustomCourses);
-      return myDepts.toSet().map((d) => _buildClassNode(d)).toList();
+      return teacherCustomCourses
+          .toSet()
+          .map((d) => _buildClassNode(d))
+          .toList();
     } else {
       // Students ONLY see their own department's course
       if (loggedDepartment != null && loggedDepartment!.isNotEmpty) {
@@ -486,7 +501,10 @@ class AppData extends ChangeNotifier {
 
   Future<void> fetchInternalStudents() async {
     try {
-      final data = await supabase.from('student_int').select().order('Enrollment No', ascending: true);
+      final data = await supabase
+          .from('student_int')
+          .select()
+          .order('Enrollment No', ascending: true);
       internalStudents = List<Map<String, dynamic>>.from(data);
       notifyListeners();
     } catch (e) {
@@ -729,7 +747,8 @@ class AppData extends ChangeNotifier {
       if (registeredCheck != null) {
         if (registeredCheck['is_blocked'] == true) {
           debugPrint('Login blocked for student: $enrollNo');
-          loginErrorMessage = 'Your ID is blocked. Contact admin to unblock it.';
+          loginErrorMessage =
+              'Your ID is blocked. Contact admin to unblock it.';
           return false;
         }
         loginErrorMessage = null; // Clear if not blocked and found
@@ -1062,7 +1081,10 @@ class AppData extends ChangeNotifier {
     }
   }
 
-  Future<bool> updateTeacherPrograms(String teacherId, List<String> courses) async {
+  Future<bool> updateTeacherPrograms(
+    String teacherId,
+    List<String> courses,
+  ) async {
     try {
       await supabase
           .from('teacher_enrollments')
@@ -1075,7 +1097,11 @@ class AppData extends ChangeNotifier {
     }
   }
 
-  bool isCourseAssignedToOther(String courseName, String currentTeacherId, List<Map<String, dynamic>> allEnrollments) {
+  bool isCourseAssignedToOther(
+    String courseName,
+    String currentTeacherId,
+    List<Map<String, dynamic>> allEnrollments,
+  ) {
     for (var env in allEnrollments) {
       if (env['teacher_id'] == currentTeacherId) continue;
       List<dynamic> courses = env['assigned_courses'] ?? [];
@@ -1115,10 +1141,26 @@ class AppData extends ChangeNotifier {
 
       // Run all queries in parallel for maximum speed
       final results = await Future.wait([
-        supabase.from('student_int').select('name').eq('Enrollment No', idInt).maybeSingle(),
-        supabase.from('student_registered_details').select('name').eq('enrollno', userId).maybeSingle(),
-        supabase.from('teacher_enrollments').select('teacher_name').eq('teacher_id', userId).maybeSingle(),
-        supabase.from('teacher_register_details').select('name').eq('teacher_id', userId).maybeSingle(),
+        supabase
+            .from('student_int')
+            .select('name')
+            .eq('Enrollment No', idInt)
+            .maybeSingle(),
+        supabase
+            .from('student_registered_details')
+            .select('name')
+            .eq('enrollno', userId)
+            .maybeSingle(),
+        supabase
+            .from('teacher_enrollments')
+            .select('teacher_name')
+            .eq('teacher_id', userId)
+            .maybeSingle(),
+        supabase
+            .from('teacher_register_details')
+            .select('name')
+            .eq('teacher_id', userId)
+            .maybeSingle(),
       ]);
 
       // Return the first non-null result find
@@ -1134,7 +1176,11 @@ class AppData extends ChangeNotifier {
     }
   }
 
-  Future<Map<String, dynamic>?> verifyUserIdentity(String id, String name, String dob) async {
+  Future<Map<String, dynamic>?> verifyUserIdentity(
+    String id,
+    String name,
+    String dob,
+  ) async {
     try {
       // Check students
       final studentRes = await supabase
@@ -1144,7 +1190,8 @@ class AppData extends ChangeNotifier {
           .eq('name', name)
           .eq('dob', dob)
           .maybeSingle();
-      if (studentRes != null) return {'table': 'student_registered_details', 'id_col': 'enrollno'};
+      if (studentRes != null)
+        return {'table': 'student_registered_details', 'id_col': 'enrollno'};
 
       // Check teachers
       final teacherRes = await supabase
@@ -1154,7 +1201,8 @@ class AppData extends ChangeNotifier {
           .eq('name', name)
           .eq('dob', dob)
           .maybeSingle();
-      if (teacherRes != null) return {'table': 'teacher_register_details', 'id_col': 'teacher_id'};
+      if (teacherRes != null)
+        return {'table': 'teacher_register_details', 'id_col': 'teacher_id'};
 
       return null;
     } catch (e) {
@@ -1163,7 +1211,12 @@ class AppData extends ChangeNotifier {
     }
   }
 
-  Future<bool> updateUserPassword(String id, String table, String idCol, String newPass) async {
+  Future<bool> updateUserPassword(
+    String id,
+    String table,
+    String idCol,
+    String newPass,
+  ) async {
     try {
       await supabase.from(table).update({'password': newPass}).eq(idCol, id);
       return true;
@@ -1175,10 +1228,16 @@ class AppData extends ChangeNotifier {
 
   Future<Map<String, List<String>>> fetchMcqInstruction() async {
     try {
-      final res = await supabase.from('mcq_settings').select().eq('id', 1).maybeSingle();
+      final res = await supabase
+          .from('mcq_settings')
+          .select()
+          .eq('id', 1)
+          .maybeSingle();
       if (res != null) {
-        List<String> dos = (res['dos'] as List?)?.map((e) => e.toString()).toList() ?? [];
-        List<String> donts = (res['donts'] as List?)?.map((e) => e.toString()).toList() ?? [];
+        List<String> dos =
+            (res['dos'] as List?)?.map((e) => e.toString()).toList() ?? [];
+        List<String> donts =
+            (res['donts'] as List?)?.map((e) => e.toString()).toList() ?? [];
         return {'dos': dos, 'donts': donts};
       }
     } catch (e) {
@@ -1187,7 +1246,10 @@ class AppData extends ChangeNotifier {
     return {'dos': [], 'donts': []};
   }
 
-  Future<bool> updateMcqInstruction({required List<String> dos, required List<String> donts}) async {
+  Future<bool> updateMcqInstruction({
+    required List<String> dos,
+    required List<String> donts,
+  }) async {
     try {
       await supabase.from('mcq_settings').upsert({
         'id': 1,
@@ -1197,7 +1259,9 @@ class AppData extends ChangeNotifier {
       });
       return true;
     } on PostgrestException catch (e) {
-      debugPrint('Supabase MCQ instruction update error: ${e.message} - ${e.details}');
+      debugPrint(
+        'Supabase MCQ instruction update error: ${e.message} - ${e.details}',
+      );
       return false;
     } catch (e) {
       debugPrint('Error updating mcq instruction: $e');
@@ -1217,8 +1281,8 @@ class AppData extends ChangeNotifier {
         idCol = 'enrollno';
         idVal = loggedEnrollNo;
         if (idVal == null) {
-           // Fallback check
-           return;
+          // Fallback check
+          return;
         }
       } else if (currentUserRole == UserRole.teacher) {
         table = 'teacher_register_details';
@@ -1230,17 +1294,21 @@ class AppData extends ChangeNotifier {
         return;
       }
 
-      final res = await supabase.from(table).select().eq(idCol, idVal).maybeSingle();
+      final res = await supabase
+          .from(table)
+          .select()
+          .eq(idCol, idVal)
+          .maybeSingle();
       if (res != null) {
         currentUserData = Map<String, dynamic>.from(res);
-        
+
         // Sync individuals for UI compatibility
         loggedName = res['name']?.toString();
         loggedPhone = res['phone']?.toString();
         loggedDepartment = res['department']?.toString();
         loggedYear = res['year']?.toString();
         loggedSemester = res['semester']?.toString();
-        
+
         if (currentUserRole == UserRole.teacher) {
           loggedDesignation = res['designation']?.toString();
         }
@@ -1346,6 +1414,7 @@ class AppData extends ChangeNotifier {
     String classId,
     String title,
     String dueDate, {
+    String? paperId, // Added paperId
     String year = 'All',
     String semester = 'All',
     PlatformFile? file,
@@ -1354,8 +1423,10 @@ class AppData extends ChangeNotifier {
     int? questionsToShow,
     DateTime? startDateTime,
     DateTime? dueDateTime,
+    bool isFlagged = false,
   }) async {
-    final newId = 'a_${DateTime.now().millisecondsSinceEpoch}';
+    final salt = Random().nextInt(10000);
+    final newId = 'a_${DateTime.now().microsecondsSinceEpoch}_$salt';
     final assignment = {
       'id': newId,
       'title': title,
@@ -1369,6 +1440,8 @@ class AppData extends ChangeNotifier {
       'timePerQuestion': timePerQuestion,
       'questionsToShow': questionsToShow,
       'isDone': false,
+      'paperId': paperId,
+      'isFlagged': isFlagged,
     };
     classAssignments.putIfAbsent(classId, () => []).insert(0, assignment);
     notifyListeners();
@@ -1385,6 +1458,8 @@ class AppData extends ChangeNotifier {
           'mcq_data': mcqData,
           'time_per_question': timePerQuestion,
           'random_question_count': questionsToShow,
+          'paper_id': paperId, // Reference paper
+          'is_flagged': isFlagged,
         });
       } else {
         // UPLOAD TEACHER FILE IF EXISTS
@@ -1416,6 +1491,7 @@ class AppData extends ChangeNotifier {
           'instructor_file_name': file?.name,
           'year': year,
           'semester': semester,
+          'paper_id': paperId, // Reference paper
         });
       }
     } catch (e) {
@@ -1426,46 +1502,82 @@ class AppData extends ChangeNotifier {
   // Load assignments from Supabase and merge into local maps
   Future<void> loadAssignmentsFromSupabase() async {
     try {
+      isAssignmentsLoading = true;
+      notifyListeners();
+
+      // Clear old local state to reflect possible updates/deletions from DB
+      classAssignments.clear();
+
       fetchRegisteredStudents(); // Load students
       fetchActiveDepartments(); // Load active departments (courses)
-
-      // 1. Fetch MCQs
-      final mcqRows = await supabase.from('teacher_mcq_content').select();
-      for (final row in mcqRows) {
-        _processAssignmentRow(row, isMcq: true);
+      if (currentUserRole == UserRole.teacher) {
+        _fetchTeacherMappingFromSupabase();
       }
 
-      // 2. Fetch Assignments
-      final assRows = await supabase
-          .from('teacher_assignment_content')
-          .select();
+      // Run independent fetches in parallel for speed
+      final results = await Future.wait([
+        supabase.from('teacher_mcq_content').select(),
+        supabase.from('teacher_assignment_content').select(),
+        supabase.from('student_registered_details').select(),
+        supabase.from('teacher_register_details').select('department'),
+      ]);
+
+      final mcqRows = results[0] as List;
+      final assRows = results[1] as List;
+
+      // Update student lists and depts in background or sync them
+      registeredStudents = List<Map<String, dynamic>>.from(results[2] as List);
+      final List<String> depts = (results[3] as List)
+          .map((e) => e['department']?.toString() ?? '')
+          .where((d) => d.isNotEmpty)
+          .toSet()
+          .toList();
+      activeDepartments = depts;
+
+      for (final row in mcqRows) {
+        _processAssignmentRow(row as Map<String, dynamic>, isMcq: true);
+      }
       for (final row in assRows) {
-        _processAssignmentRow(row, isMcq: false);
+        _processAssignmentRow(row as Map<String, dynamic>, isMcq: false);
       }
 
       // 3. Load Student Statuses (Current student ONLY)
       final studentId = loggedEnrollNo ?? loggedPhone ?? loggedEmail;
       if (studentId != null) {
-        // Load MCQ Results
-        final mcqResults = await supabase
-            .from('student_mcq_results')
-            .select()
-            .eq('student_id', studentId);
+        final statusResults = await Future.wait([
+          supabase
+              .from('student_mcq_results')
+              .select()
+              .eq('student_id', studentId),
+          supabase
+              .from('student_assignment_responses')
+              .select()
+              .eq('student_id', studentId),
+        ]);
+
+        final mcqResults = statusResults[0] as List;
         for (final r in mcqResults) {
-          _updateLocalStatus(r['mcq_id'], r, isMcq: true);
+          _updateLocalStatus(
+            r['mcq_id'],
+            r as Map<String, dynamic>,
+            isMcq: true,
+          );
         }
 
-        // Load Assignment Results
-        final assResults = await supabase
-            .from('student_assignment_responses')
-            .select()
-            .eq('student_id', studentId);
+        final assResults = statusResults[1] as List;
         for (final r in assResults) {
-          _updateLocalStatus(r['assignment_id'], r, isMcq: false);
+          _updateLocalStatus(
+            r['assignment_id'],
+            r as Map<String, dynamic>,
+            isMcq: false,
+          );
         }
       }
+      isAssignmentsLoading = false;
       notifyListeners();
     } catch (e) {
+      isAssignmentsLoading = false;
+      notifyListeners();
       debugPrint('Supabase loadAssignments error: $e');
     }
   }
@@ -1637,8 +1749,8 @@ class AppData extends ChangeNotifier {
 // ---------------------------------------------------------
 // Main App Shell
 // ---------------------------------------------------------
-class PTU_PORTALApp extends StatelessWidget {
-  const PTU_PORTALApp({super.key});
+class EduPortalApp extends StatelessWidget {
+  const EduPortalApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -2056,6 +2168,17 @@ class McqCentralView extends StatefulWidget {
 }
 
 class _McqCentralViewState extends State<McqCentralView> {
+  Set<int> selectedIndices = {};
+  bool isSelectionMode = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      AppData().loadAssignmentsFromSupabase();
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     bool isTeacher = AppData().currentUserRole == UserRole.teacher;
@@ -2075,209 +2198,430 @@ class _McqCentralViewState extends State<McqCentralView> {
 
     return Scaffold(
       backgroundColor: Colors.transparent,
-      body: Padding(
-        padding: EdgeInsets.all(isMobile ? 12.0 : 40.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            isMobile
-                ? Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        isTeacher ? 'Review MCQs' : 'MCQs To-Do',
-                        style: const TextStyle(
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      if (isTeacher) ...[
-                        const SizedBox(height: 12),
-                        SizedBox(
-                          width: double.infinity,
-                          child: ElevatedButton.icon(
-                            onPressed: () => _openCreateMcqTestDialog(context),
-                            icon: const Icon(Icons.add, size: 18),
-                            label: const Text('Upload MCQ JSON'),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF6C5CE7),
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(vertical: 12),
+      body: RefreshIndicator(
+        onRefresh: () => AppData().loadAssignmentsFromSupabase(),
+        color: const Color(0xFF6C5CE7),
+        child: Padding(
+          padding: EdgeInsets.all(isMobile ? 12.0 : 40.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              isMobile
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              isTeacher ? 'Review MCQs' : 'MCQs To-Do',
+                              style: const TextStyle(
+                                fontSize: 22,
+                                fontWeight: FontWeight.bold,
+                              ),
                             ),
-                          ),
-                        ),
-                      ],
-                    ],
-                  )
-                : Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        isTeacher
-                            ? 'MCQ Tests To Review'
-                            : 'Your MCQ Tests To-Do',
-                        style: const TextStyle(
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      if (isTeacher)
-                        ElevatedButton.icon(
-                          onPressed: () => _openCreateMcqTestDialog(context),
-                          icon: const Icon(Icons.add),
-                          label: const Text('Upload New MCQ JSON Test'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF6C5CE7),
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 24,
-                              vertical: 16,
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-            SizedBox(height: isMobile ? 16 : 32),
-            Expanded(
-              child: allMcqTests.isEmpty
-                  ? const Center(
-                      child: Text(
-                        'No MCQ Tests available.',
-                        style: TextStyle(color: Colors.grey, fontSize: 16),
-                      ),
-                    )
-                  : ListView.builder(
-                      itemCount: allMcqTests.length,
-                      itemBuilder: (ctx, i) {
-                        var item = allMcqTests[i];
-                        var cls = item['classData'];
-                        var a = item['assignment'];
-
-                        return Card(
-                          margin: const EdgeInsets.only(bottom: 12),
-                          elevation: 0,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16),
-                            side: BorderSide(color: Colors.grey.shade200),
-                          ),
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(16),
-                            onTap: () {
-                              Navigator.push(
-                                context,
-                                MaterialPageRoute(
-                                  builder: (_) => AssignmentInteractionScreen(
-                                    assignment: a,
-                                    classColor: cls['color'],
-                                    classData: cls,
-                                  ),
+                            if (isTeacher && selectedIndices.isNotEmpty)
+                              IconButton(
+                                icon: const Icon(
+                                  Icons.download_for_offline,
+                                  color: Color(0xFF6C5CE7),
                                 ),
-                              );
-                            },
-                            child: Padding(
-                              padding: EdgeInsets.all(isMobile ? 16.0 : 24.0),
-                              child: Row(
-                                children: [
-                                  CircleAvatar(
-                                    radius: isMobile ? 20 : 24,
-                                    backgroundColor: cls['color'].withAlpha(20),
-                                    child: Icon(
-                                      Icons.quiz,
-                                      color: cls['color'],
-                                      size: isMobile ? 20 : 24,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 16),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          a['title'],
-                                          style: TextStyle(
-                                            fontSize: isMobile ? 16 : 18,
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                        const SizedBox(height: 4),
-                                        Text(
-                                          '${cls['title']}\nExpires: ${a['dueDateTime']?.toString().substring(0, 16) ?? a['dueDate']}',
-                                          style: TextStyle(
-                                            color: Colors.grey.shade600,
-                                            fontSize: isMobile ? 12 : 14,
-                                          ),
-                                          maxLines: 2,
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  if (isTeacher)
-                                    isMobile
-                                        ? IconButton(
-                                            icon: const Icon(
-                                              Icons.delete_outline,
-                                              color: Colors.red,
-                                              size: 20,
-                                            ),
-                                            onPressed: () =>
-                                                _showDeleteConfirmation(
-                                                  context,
-                                                  cls['id'],
-                                                  a['id'],
-                                                ),
-                                          )
-                                        : Row(
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              const Text(
-                                                'Assigned',
-                                                style: TextStyle(
-                                                  color: Color(0xFF6C5CE7),
-                                                  fontWeight: FontWeight.w600,
-                                                  fontSize: 13,
-                                                ),
-                                              ),
-                                              const SizedBox(width: 8),
-                                              IconButton(
-                                                icon: const Icon(
-                                                  Icons.delete_outline,
-                                                  color: Colors.red,
-                                                ),
-                                                onPressed: () =>
-                                                    _showDeleteConfirmation(
-                                                      context,
-                                                      cls['id'],
-                                                      a['id'],
-                                                    ),
-                                              ),
-                                            ],
-                                          )
-                                  else
-                                    a['isDone']
-                                        ? const Icon(
-                                            Icons.check_circle,
-                                            color: Colors.green,
-                                          )
-                                        : const Icon(
-                                            Icons.pending_actions,
-                                            color: Colors.orange,
-                                          ),
-                                ],
+                                onPressed: () =>
+                                    _bulkDownloadMarks(allMcqTests),
+                                tooltip: 'Download Selected Marks',
+                              ),
+                          ],
+                        ),
+                        if (isTeacher) ...[
+                          const SizedBox(height: 12),
+                          SizedBox(
+                            width: double.infinity,
+                            child: ElevatedButton.icon(
+                              onPressed: () => openCreateMcqTestDialog(context),
+                              icon: const Icon(Icons.add, size: 18),
+                              label: const Text('Upload MCQ JSON'),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF6C5CE7),
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 12,
+                                ),
                               ),
                             ),
                           ),
-                        );
-                      },
+                        ],
+                      ],
+                    )
+                  : Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          children: [
+                            Text(
+                              isTeacher
+                                  ? 'MCQ Tests To Review'
+                                  : 'Your MCQ Tests To-Do',
+                              style: const TextStyle(
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            if (isTeacher && selectedIndices.isNotEmpty) ...[
+                              const SizedBox(width: 16),
+                              ElevatedButton.icon(
+                                onPressed: () =>
+                                    _bulkDownloadMarks(allMcqTests),
+                                icon: const Icon(Icons.download_rounded),
+                                label: Text(
+                                  'Download Marks (${selectedIndices.length})',
+                                ),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.white,
+                                  foregroundColor: const Color(0xFF6C5CE7),
+                                  side: const BorderSide(
+                                    color: Color(0xFF6C5CE7),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                        if (isTeacher)
+                          ElevatedButton.icon(
+                            onPressed: () => openCreateMcqTestDialog(context),
+                            icon: const Icon(Icons.add),
+                            label: const Text('Upload New MCQ JSON Test'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF6C5CE7),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 24,
+                                vertical: 16,
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
-            ),
-          ],
+              SizedBox(height: isMobile ? 16 : 32),
+              Expanded(
+                child: allMcqTests.isEmpty
+                    ? const Center(
+                        child: Text(
+                          'No MCQ Tests available.',
+                          style: TextStyle(color: Colors.grey, fontSize: 16),
+                        ),
+                      )
+                    : ListView.builder(
+                        itemCount: allMcqTests.length,
+                        itemBuilder: (ctx, i) {
+                          var item = allMcqTests[i];
+                          var cls = item['classData'];
+                          var a = item['assignment'];
+
+                          return Card(
+                            margin: const EdgeInsets.only(bottom: 12),
+                            elevation: 0,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(16),
+                              side: BorderSide(color: Colors.grey.shade200),
+                            ),
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(16),
+                              onTap: () {
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (_) => AssignmentInteractionScreen(
+                                      assignment: a,
+                                      classColor: cls['color'],
+                                      classData: cls,
+                                    ),
+                                  ),
+                                );
+                              },
+                              onLongPress: isTeacher
+                                  ? () {
+                                      setState(() {
+                                        selectedIndices.add(i);
+                                      });
+                                    }
+                                  : null,
+                              child: Padding(
+                                padding: EdgeInsets.all(isMobile ? 16.0 : 24.0),
+                                child: Row(
+                                  children: [
+                                    if (isTeacher)
+                                      Padding(
+                                        padding: const EdgeInsets.only(
+                                          right: 12,
+                                        ),
+                                        child: GestureDetector(
+                                          onTap:
+                                              () {}, // Prevent card tap when clicking checkbox
+                                          child: Checkbox(
+                                            value: selectedIndices.contains(i),
+                                            onChanged: (val) {
+                                              setState(() {
+                                                if (val == true) {
+                                                  selectedIndices.add(i);
+                                                } else {
+                                                  selectedIndices.remove(i);
+                                                }
+                                              });
+                                            },
+                                            activeColor: const Color(
+                                              0xFF6C5CE7,
+                                            ),
+                                            shape: RoundedRectangleBorder(
+                                              borderRadius:
+                                                  BorderRadius.circular(4),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    CircleAvatar(
+                                      radius: isMobile ? 20 : 24,
+                                      backgroundColor: cls['color'].withAlpha(
+                                        20,
+                                      ),
+                                      child: Icon(
+                                        Icons.quiz,
+                                        color: cls['color'],
+                                        size: isMobile ? 20 : 24,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 16),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            a['title'],
+                                            style: TextStyle(
+                                              fontSize: isMobile ? 16 : 18,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            '${cls['title']}\nExpires: ${a['dueDateTime']?.toString().substring(0, 16) ?? a['dueDate']}',
+                                            style: TextStyle(
+                                              color: Colors.grey.shade600,
+                                              fontSize: isMobile ? 12 : 14,
+                                            ),
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    if (isTeacher)
+                                      isMobile
+                                          ? IconButton(
+                                              icon: const Icon(
+                                                Icons.delete_outline,
+                                                color: Colors.red,
+                                                size: 20,
+                                              ),
+                                              onPressed: () =>
+                                                  _showDeleteConfirmation(
+                                                    context,
+                                                    cls['id'],
+                                                    a['id'],
+                                                  ),
+                                            )
+                                          : Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                const Text(
+                                                  'Assigned',
+                                                  style: TextStyle(
+                                                    color: Color(0xFF6C5CE7),
+                                                    fontWeight: FontWeight.w600,
+                                                    fontSize: 13,
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 8),
+                                                IconButton(
+                                                  icon: const Icon(
+                                                    Icons.delete_outline,
+                                                    color: Colors.red,
+                                                  ),
+                                                  onPressed: () =>
+                                                      _showDeleteConfirmation(
+                                                        context,
+                                                        cls['id'],
+                                                        a['id'],
+                                                      ),
+                                                ),
+                                              ],
+                                            )
+                                    else
+                                      a['isDone']
+                                          ? const Icon(
+                                              Icons.check_circle,
+                                              color: Colors.green,
+                                            )
+                                          : const Icon(
+                                              Icons.pending_actions,
+                                              color: Colors.orange,
+                                            ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
         ),
       ),
     );
+  }
+
+  Future<void> _bulkDownloadMarks(List<Map<String, dynamic>> allTests) async {
+    List<Map<String, dynamic>> testsToExport = [];
+    for (int idx in selectedIndices) {
+      if (idx < allTests.length) {
+        testsToExport.add(allTests[idx]);
+      }
+    }
+
+    if (testsToExport.isEmpty) return;
+
+    // We will download them one by one
+    for (var item in testsToExport) {
+      var cls = item['classData'];
+      var a = item['assignment'];
+
+      String targetCourse = (cls['title'] ?? 'Course').toString();
+      String displayName = (a['title'] ?? 'Test').toString();
+
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => Center(
+          child: Card(
+            child: Padding(
+              padding: const EdgeInsets.all(24.0),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const CircularProgressIndicator(),
+                  const SizedBox(height: 16),
+                  Text('Generating $displayName...'),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+
+      try {
+        var excel = ex.Excel.createExcel();
+
+        // Fetch students for THIS department
+        final studentsResponse = await supabase
+            .from('student_registered_details')
+            .select()
+            .eq('department', cls['title']);
+        final students = List<Map<String, dynamic>>.from(studentsResponse);
+
+        // Fetch MCQ results for THIS test
+        final statusResponse = await supabase
+            .from('student_mcq_results')
+            .select()
+            .eq('mcq_id', a['id']);
+        final statusList = List<Map<String, dynamic>>.from(statusResponse);
+
+        final Map<String, Map<String, dynamic>> statuses = {};
+        for (var row in statusList) {
+          statuses[row['student_id'].toString()] = {
+            'is_done': row['is_completed'],
+            'mcq_score': row['score'],
+            'is_flagged': row['is_flagged'] ?? false,
+          };
+        }
+
+        String safeSheetName = displayName.replaceAll(
+          RegExp(r'[\[\]\*\/\\\?\:]'),
+          '_',
+        );
+        if (safeSheetName.length > 30)
+          safeSheetName = safeSheetName.substring(0, 30);
+
+        ex.Sheet sheet = excel[safeSheetName];
+
+        // Headers
+        sheet.appendRow([
+          ex.TextCellValue('Student Name'),
+          ex.TextCellValue('ID / Enrollment'),
+          ex.TextCellValue('Status'),
+          ex.TextCellValue('Score'),
+          ex.TextCellValue('Flagged'),
+        ]);
+
+        for (var student in students) {
+          String name = student['name'] ?? 'Unknown';
+          String stdId = (student['enrollno'] ?? student['Enrollment No'] ?? '')
+              .toString();
+
+          final status = statuses[stdId];
+          bool hasSubmitted = status?['is_done'] ?? false;
+          int? score = status?['mcq_score'];
+          bool flagged = status?['is_flagged'] ?? false;
+          int totalQ =
+              (a['questionsToShow'] as int?) ??
+              (a['mcqData'] as List?)?.length ??
+              1;
+
+          sheet.appendRow([
+            ex.TextCellValue(name),
+            ex.TextCellValue(stdId),
+            ex.TextCellValue(hasSubmitted ? 'Submitted' : 'Pending'),
+            ex.TextCellValue(score != null ? '$score / $totalQ' : '-'),
+            ex.TextCellValue(flagged ? 'YES' : 'NO'),
+          ]);
+        }
+
+        if (excel.tables.containsKey('Sheet1') && excel.tables.length > 1) {
+          excel.delete('Sheet1');
+        }
+
+        var fileBytes = excel.encode();
+        if (mounted) Navigator.pop(context); // Close loading
+
+        if (fileBytes != null) {
+          String finalFileName = "${targetCourse}_$displayName"
+              .replaceAll(RegExp(r'[^\w\s\-]'), '')
+              .replaceAll(' ', '_');
+
+          await FilePicker.platform.saveFile(
+            dialogTitle: 'Save Marks for $displayName',
+            fileName: '$finalFileName.xlsx',
+            type: FileType.custom,
+            allowedExtensions: ['xlsx'],
+            bytes: Uint8List.fromList(fileBytes),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          Navigator.pop(context);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error downloading $displayName: $e')),
+          );
+        }
+      }
+    }
+
+    setState(() {
+      selectedIndices.clear();
+    });
   }
 
   void _showDeleteConfirmation(
@@ -2310,727 +2654,901 @@ class _McqCentralViewState extends State<McqCentralView> {
       ),
     );
   }
+}
 
-  void _openCreateMcqTestDialog(BuildContext context) {
-    // Forenoon Controllers
-    TextEditingController titleCtrlFN = TextEditingController();
-    TextEditingController timeCtrlFN = TextEditingController(text: '30');
-    TextEditingController randomCountCtrlFN = TextEditingController();
-    bool isTimedFN = true;
-    DateTime startFN = DateTime.now().copyWith(hour: 9, minute: 0);
-    DateTime endFN = DateTime.now().copyWith(hour: 12, minute: 0);
-    List<dynamic>? mcqDataFN;
+void openCreateMcqTestDialog(
+  BuildContext context, {
+  String? paperId,
+  VoidCallback? onComplete,
+}) {
+  String selectedYear = AppData().loggedYear ?? 'All';
+  String selectedSem = AppData().loggedSemester ?? 'All';
+  String? defaultClassId = AppData().filteredClasses.isNotEmpty
+      ? AppData().filteredClasses.first['id']
+      : null;
 
-    // Afternoon Controllers
-    TextEditingController titleCtrlAN = TextEditingController();
-    TextEditingController timeCtrlAN = TextEditingController(text: '30');
-    TextEditingController randomCountCtrlAN = TextEditingController();
-    bool isTimedAN = true;
-    DateTime startAN = DateTime.now().copyWith(hour: 14, minute: 0);
-    DateTime endAN = DateTime.now().copyWith(hour: 17, minute: 0);
-    List<dynamic>? mcqDataAN;
-    String? selectedClassIdFN;
-    String? selectedClassIdAN;
+  // Initially one session with current time
+  List<Map<String, dynamic>> sessions = [
+    {
+      'titleCtrl': TextEditingController(),
+      'timeCtrl': TextEditingController(text: '30'),
+      'randomCtrl': TextEditingController(),
+      'isTimed': false,
+      'isFlagged': false,
+      'start': DateTime.now(),
+      'end': DateTime.now().add(const Duration(hours: 3)),
+      'mcqData': null,
+      'selectedClassId': defaultClassId,
+      'label': 'Session 1',
+    },
+  ];
 
-    String selectedYear = AppData().loggedYear ?? 'All';
-    String selectedSem = AppData().loggedSemester ?? 'All';
-    String? selectedClassId = AppData().filteredClasses.isNotEmpty
-        ? AppData().filteredClasses.first['id']
-        : null;
+  showDialog(
+    context: context,
+    builder: (ctx) {
+      return StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          int activeSessions = sessions
+              .where((s) => s['mcqData'] != null)
+              .length;
 
-    showDialog(
-      context: context,
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (ctx, setDialogState) {
-            bool hasFN = mcqDataFN != null;
-            bool hasAN = mcqDataAN != null;
-
-            return AlertDialog(
-              backgroundColor: const Color(0xFFF8F9FE),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(28),
-              ),
-              titlePadding: EdgeInsets.zero,
-              title: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 32,
-                  vertical: 24,
+          return AlertDialog(
+            backgroundColor: const Color(0xFFF8F9FE),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(28),
+            ),
+            titlePadding: EdgeInsets.zero,
+            title: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [Color(0xFF6C5CE7), Color(0xFFA29BFE)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
                 ),
-                decoration: const BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [Color(0xFF6C5CE7), Color(0xFFA29BFE)],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
-                  borderRadius: BorderRadius.only(
-                    topLeft: Radius.circular(28),
-                    topRight: Radius.circular(28),
-                  ),
-                ),
-                child: Row(
-                  children: [
-                    const CircleAvatar(
-                      backgroundColor: Colors.white24,
-                      child: Icon(Icons.auto_awesome, color: Colors.white),
-                    ),
-                    const SizedBox(width: 16),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Configure MCQ Sessions',
-                          style: GoogleFonts.outfit(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 22,
-                          ),
-                        ),
-                        Text(
-                          'Set up independent batches for the same test',
-                          style: GoogleFonts.outfit(
-                            color: Colors.white70,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w400,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const Spacer(),
-                    IconButton(
-                      onPressed: () => Navigator.pop(ctx),
-                      icon: const Icon(Icons.close, color: Colors.white70),
-                    ),
-                  ],
+                borderRadius: BorderRadius.only(
+                  topLeft: Radius.circular(28),
+                  topRight: Radius.circular(28),
                 ),
               ),
-              content: SizedBox(
-                width: 900,
-                child: SingleChildScrollView(
-                  child: Padding(
-                    padding: const EdgeInsets.only(top: 24.0),
-                    child: Column(
-                      children: [
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            // FORENOON CARD
-                            Expanded(
-                              child: _buildAdvancedSessionCard(
-                                label: 'FORENOON BATCH',
-                                sublabel: 'AM Session',
-                                icon: Icons.wb_sunny_rounded,
-                                themeColor: const Color(0xFF6C5CE7),
-                                data: mcqDataFN,
-                                titleCtrl: titleCtrlFN,
-                                randomCtrl: randomCountCtrlFN,
-                                timeCtrl: timeCtrlFN,
-                                isTimed: isTimedFN,
-                                start: startFN,
-                                end: endFN,
-                                onToggleTimed: () => setDialogState(
-                                  () => isTimedFN = !isTimedFN,
-                                ),
-                                onPickFile: () async {
-                                  var res = await _pickMcqJson();
-                                  if (res != null) {
-                                    setDialogState(() {
-                                      mcqDataFN = res;
-                                      if (titleCtrlFN.text.isEmpty)
-                                        titleCtrlFN.text = 'Forenoon MCQ';
-                                    });
-                                  }
-                                },
-                                onPickTime: (isStart) async {
-                                  var dt = await _pickDateTime(
-                                    ctx,
-                                    isStart ? startFN : endFN,
-                                  );
-                                  if (dt != null)
-                                    setDialogState(
-                                      () => isStart ? startFN = dt : endFN = dt,
-                                    );
-                                },
-                                selectedCourse: selectedClassIdFN,
-                                onCourseChanged: (val) => setDialogState(
-                                  () => selectedClassIdFN = val,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 24),
-                            // AFTERNOON CARD
-                            Expanded(
-                              child: _buildAdvancedSessionCard(
-                                label: 'AFTERNOON BATCH',
-                                sublabel: 'PM Session',
-                                icon: Icons.nights_stay_rounded,
-                                themeColor: const Color(0xFFFD79A8),
-                                data: mcqDataAN,
-                                titleCtrl: titleCtrlAN,
-                                randomCtrl: randomCountCtrlAN,
-                                timeCtrl: timeCtrlAN,
-                                isTimed: isTimedAN,
-                                start: startAN,
-                                end: endAN,
-                                onToggleTimed: () => setDialogState(
-                                  () => isTimedAN = !isTimedAN,
-                                ),
-                                onPickFile: () async {
-                                  var res = await _pickMcqJson();
-                                  if (res != null) {
-                                    setDialogState(() {
-                                      mcqDataAN = res;
-                                      if (titleCtrlAN.text.isEmpty)
-                                        titleCtrlAN.text = 'Afternoon MCQ';
-                                    });
-                                  }
-                                },
-                                onPickTime: (isStart) async {
-                                  var dt = await _pickDateTime(
-                                    ctx,
-                                    isStart ? startAN : endAN,
-                                  );
-                                  if (dt != null)
-                                    setDialogState(
-                                      () => isStart ? startAN = dt : endAN = dt,
-                                    );
-                                },
-                                selectedCourse: selectedClassIdAN,
-                                onCourseChanged: (val) => setDialogState(
-                                  () => selectedClassIdAN = val,
-                                ),
-                              ),
-                            ),
-                          ],
+              child: Row(
+                children: [
+                  const CircleAvatar(
+                    backgroundColor: Colors.white24,
+                    child: Icon(Icons.auto_awesome, color: Colors.white),
+                  ),
+                  const SizedBox(width: 16),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Configure MCQ Sessions',
+                        style: GoogleFonts.outfit(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 22,
                         ),
-                        const SizedBox(height: 32),
-                        Container(
+                      ),
+                      Text(
+                        'Set up independent batches for the same test',
+                        style: GoogleFonts.outfit(
+                          color: Colors.white70,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w400,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    icon: const Icon(Icons.close, color: Colors.white70),
+                  ),
+                  IconButton(
+                    onPressed: () => downloadMcqTemplate(context),
+                    icon: const Icon(
+                      Icons.file_download_outlined,
+                      color: Colors.white,
+                    ),
+                    tooltip: 'Download Excel Format',
+                  ),
+                ],
+              ),
+            ),
+            content: SizedBox(
+              width: 1000,
+              child: SingleChildScrollView(
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 24.0),
+                  child: Column(
+                    children: [
+                      Wrap(
+                        spacing: 24,
+                        runSpacing: 24,
+                        alignment: WrapAlignment.center,
+                        children: sessions.asMap().entries.map((entry) {
+                          int idx = entry.key;
+                          var s = entry.value;
+                          return SizedBox(
+                            width: 450,
+                            child: Stack(
+                              children: [
+                                buildAdvancedSessionCard(
+                                  label: s['label'],
+                                  sublabel: 'Batch Session',
+                                  icon: idx % 2 == 0
+                                      ? Icons.wb_sunny_rounded
+                                      : Icons.nights_stay_rounded,
+                                  themeColor: idx % 2 == 0
+                                      ? const Color(0xFF6C5CE7)
+                                      : const Color(0xFFFD79A8),
+                                  data: s['mcqData'],
+                                  titleCtrl: s['titleCtrl'],
+                                  randomCtrl: s['randomCtrl'],
+                                  timeCtrl: s['timeCtrl'],
+                                  isTimed: s['isTimed'],
+                                  isFlagged: s['isFlagged'] ?? false,
+                                  start: s['start'],
+                                  end: s['end'],
+                                  onToggleTimed: () => setDialogState(
+                                    () => s['isTimed'] = !s['isTimed'],
+                                  ),
+                                  onToggleFlagged: () => setDialogState(
+                                    () => s['isFlagged'] =
+                                        !(s['isFlagged'] ?? false),
+                                  ),
+                                  onPickFile: () async {
+                                    var res = await pickMcqFile(ctx);
+                                    if (res != null) {
+                                      setDialogState(() {
+                                        s['mcqData'] = res;
+                                        if (s['titleCtrl'].text.isEmpty) {
+                                          s['titleCtrl'].text =
+                                              '${s['label']} Test';
+                                        }
+                                      });
+                                    }
+                                  },
+                                  onPickTime: (isStart) async {
+                                    var dt = await pickDateTime(
+                                      ctx,
+                                      isStart ? s['start'] : s['end'],
+                                    );
+                                    if (dt != null)
+                                      setDialogState(
+                                        () => isStart
+                                            ? s['start'] = dt
+                                            : s['end'] = dt,
+                                      );
+                                  },
+                                  selectedCourse: s['selectedClassId'],
+                                  onCourseChanged: (val) => setDialogState(
+                                    () => s['selectedClassId'] = val,
+                                  ),
+                                  context: ctx,
+                                ),
+                                if (sessions.length > 1)
+                                  Positioned(
+                                    right: 8,
+                                    top: 8,
+                                    child: IconButton(
+                                      icon: const Icon(
+                                        Icons.remove_circle_outline,
+                                        color: Colors.redAccent,
+                                      ),
+                                      onPressed: () => setDialogState(
+                                        () => sessions.removeAt(idx),
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                      const SizedBox(height: 32),
+                      OutlinedButton.icon(
+                        onPressed: () {
+                          setDialogState(() {
+                            sessions.add({
+                              'titleCtrl': TextEditingController(),
+                              'timeCtrl': TextEditingController(text: '30'),
+                              'randomCtrl': TextEditingController(),
+                              'isTimed': false,
+                              'isFlagged': false,
+                              'start': DateTime.now(),
+                              'end': DateTime.now().add(
+                                const Duration(hours: 3),
+                              ),
+                              'mcqData': null,
+                              'selectedClassId': defaultClassId,
+                              'label': 'Session ${sessions.length + 1}',
+                            });
+                          });
+                        },
+                        icon: const Icon(Icons.add),
+                        label: const Text('Add Another Session Batch'),
+                        style: OutlinedButton.styleFrom(
                           padding: const EdgeInsets.symmetric(
                             horizontal: 24,
                             vertical: 16,
                           ),
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(16),
-                            border: Border.all(
-                              color: Colors.grey.withAlpha(30),
+                          side: const BorderSide(color: Color(0xFF6C5CE7)),
+                          foregroundColor: const Color(0xFF6C5CE7),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 32),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 24,
+                          vertical: 16,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: Colors.grey.withAlpha(30)),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.info_outline,
+                              color: Colors.blue.shade400,
+                            ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: Text(
+                                'Sessions marked as "Active" will be published as separate tests. Ensure document is uploaded for each batch you want to activate.',
+                                style: GoogleFonts.outfit(
+                                  fontSize: 13,
+                                  color: Colors.grey.shade600,
+                                ),
+                              ),
+                            ),
+                            if (activeSessions > 0)
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 6,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF6C5CE7).withAlpha(20),
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                child: Text(
+                                  '$activeSessions Active Session(s)',
+                                  style: const TextStyle(
+                                    color: Color(0xFF6C5CE7),
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            actionsPadding: const EdgeInsets.fromLTRB(32, 0, 32, 32),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: Text(
+                  'Cancel Task',
+                  style: GoogleFonts.outfit(
+                    color: Colors.grey,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              ElevatedButton(
+                onPressed: () async {
+                  if (activeSessions == 0) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'Please upload at least one JSON or Excel file',
+                        ),
+                      ),
+                    );
+                    return;
+                  }
+
+                  for (var s in sessions) {
+                    if (s['mcqData'] != null) {
+                      if (s['selectedClassId'] == null) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              'Please select a course for ${s['label']}',
                             ),
                           ),
-                          child: Row(
-                            children: [
-                              Icon(
-                                Icons.info_outline,
-                                color: Colors.blue.shade400,
-                              ),
-                              const SizedBox(width: 16),
-                              Expanded(
-                                child: Text(
-                                  'Sessions marked as "Active" will be published as separate tests. Ensure document is uploaded for each batch you want to activate.',
-                                  style: GoogleFonts.outfit(
-                                    fontSize: 13,
-                                    color: Colors.grey.shade600,
-                                  ),
-                                ),
-                              ),
-                              if (hasFN || hasAN)
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 12,
-                                    vertical: 6,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: const Color(
-                                      0xFF6C5CE7,
-                                    ).withAlpha(20),
-                                    borderRadius: BorderRadius.circular(20),
-                                  ),
-                                  child: Text(
-                                    '${(hasFN ? 1 : 0) + (hasAN ? 1 : 0)} Active Session(s)',
-                                    style: const TextStyle(
-                                      color: Color(0xFF6C5CE7),
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                                ),
-                            ],
+                        );
+                        return;
+                      }
+                      if (s['titleCtrl'].text.isEmpty) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('Title required for ${s['label']}'),
                           ),
-                        ),
-                      ],
-                    ),
+                        );
+                        return;
+                      }
+                      await AppData().addAssignment(
+                        s['selectedClassId'],
+                        s['titleCtrl'].text,
+                        s['end'].toString().substring(0, 16),
+                        paperId: paperId, // Pass paperId
+                        year: selectedYear,
+                        semester: selectedSem,
+                        mcqData: s['mcqData'],
+                        timePerQuestion: s['isTimed']
+                            ? (int.tryParse(s['timeCtrl'].text) ?? 30)
+                            : 0,
+                        questionsToShow: int.tryParse(s['randomCtrl'].text),
+                        startDateTime: s['start'],
+                        dueDateTime: s['end'],
+                        isFlagged: s['isFlagged'] ?? false,
+                      );
+                    }
+                  }
+
+                  Navigator.pop(ctx);
+                  onComplete?.call();
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF6C5CE7),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 40,
+                    vertical: 20,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  elevation: 8,
+                  shadowColor: const Color(0xFF6C5CE7).withAlpha(100),
+                ),
+                child: Text(
+                  'Deploy Test Sessions',
+                  style: GoogleFonts.outfit(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
                   ),
                 ),
               ),
-              actionsPadding: const EdgeInsets.fromLTRB(32, 0, 32, 32),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: Text(
-                    'Cancel Task',
-                    style: GoogleFonts.outfit(
-                      color: Colors.grey,
-                      fontWeight: FontWeight.w600,
-                    ),
+            ],
+          );
+        },
+      );
+    },
+  );
+}
+
+Widget buildAdvancedSessionCard({
+  required String label,
+  required String sublabel,
+  required IconData icon,
+  required Color themeColor,
+  required List<dynamic>? data,
+  required TextEditingController titleCtrl,
+  required TextEditingController randomCtrl,
+  required TextEditingController timeCtrl,
+  required bool isTimed,
+  required bool isFlagged,
+  required DateTime start,
+  required DateTime end,
+  required VoidCallback onToggleTimed,
+  required VoidCallback onToggleFlagged,
+  required VoidCallback onPickFile,
+  required Function(bool) onPickTime,
+  String? selectedCourse,
+  required Function(String?) onCourseChanged,
+  required BuildContext context,
+}) {
+  bool isActive = data != null;
+
+  return AnimatedContainer(
+    duration: const Duration(milliseconds: 300),
+    padding: const EdgeInsets.all(32),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(24),
+      boxShadow: [
+        BoxShadow(
+          color: isActive
+              ? themeColor.withAlpha(20)
+              : Colors.black.withAlpha(10),
+          blurRadius: 30,
+          offset: const Offset(0, 15),
+        ),
+      ],
+      border: Border.all(
+        color: isActive ? themeColor.withAlpha(80) : Colors.grey.withAlpha(30),
+        width: isActive ? 2 : 1,
+      ),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: isActive
+                    ? themeColor.withAlpha(30)
+                    : Colors.grey.withAlpha(20),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Icon(icon, color: isActive ? themeColor : Colors.grey),
+            ),
+            const SizedBox(width: 16),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: GoogleFonts.outfit(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                    color: isActive ? themeColor : Colors.grey.shade800,
                   ),
                 ),
-                const SizedBox(width: 8),
-                ElevatedButton(
-                  onPressed: () async {
-                    if (mcqDataFN == null && mcqDataAN == null) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Please upload at least one JSON file'),
-                        ),
-                      );
-                      return;
-                    }
-
-                    if (mcqDataFN != null && selectedClassIdFN == null) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text(
-                            'Please select a course for Forenoon batch',
-                          ),
-                        ),
-                      );
-                      return;
-                    }
-                    if (mcqDataAN != null && selectedClassIdAN == null) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text(
-                            'Please select a course for Afternoon batch',
-                          ),
-                        ),
-                      );
-                      return;
-                    }
-
-                    // Create missions
-                    if (mcqDataFN != null) {
-                      if (titleCtrlFN.text.isEmpty) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Forenoon title required'),
-                          ),
-                        );
-                        return;
-                      }
-                      await AppData().addAssignment(
-                        selectedClassIdFN!,
-                        '${titleCtrlFN.text} (FN)',
-                        endFN.toString().substring(0, 16),
-                        year: selectedYear,
-                        semester: selectedSem,
-                        mcqData: mcqDataFN,
-                        timePerQuestion: isTimedFN
-                            ? (int.tryParse(timeCtrlFN.text) ?? 30)
-                            : 0,
-                        questionsToShow: int.tryParse(randomCountCtrlFN.text),
-                        startDateTime: startFN,
-                        dueDateTime: endFN,
-                      );
-                    }
-
-                    if (mcqDataAN != null) {
-                      if (titleCtrlAN.text.isEmpty) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Afternoon title required'),
-                          ),
-                        );
-                        return;
-                      }
-                      await AppData().addAssignment(
-                        selectedClassIdAN!,
-                        '${titleCtrlAN.text} (AN)',
-                        endAN.toString().substring(0, 16),
-                        year: selectedYear,
-                        semester: selectedSem,
-                        mcqData: mcqDataAN,
-                        timePerQuestion: isTimedAN
-                            ? (int.tryParse(timeCtrlAN.text) ?? 30)
-                            : 0,
-                        questionsToShow: int.tryParse(randomCountCtrlAN.text),
-                        startDateTime: startAN,
-                        dueDateTime: endAN,
-                      );
-                    }
-
-                    Navigator.pop(ctx);
-                    setState(() {});
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF6C5CE7),
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 40,
-                      vertical: 20,
-                    ),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    elevation: 8,
-                    shadowColor: const Color(0xFF6C5CE7).withAlpha(100),
-                  ),
-                  child: Text(
-                    'Deploy Test Sessions',
-                    style: GoogleFonts.outfit(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16,
-                    ),
-                  ),
+                Text(
+                  sublabel,
+                  style: GoogleFonts.outfit(fontSize: 12, color: Colors.grey),
                 ),
               ],
+            ),
+            const Spacer(),
+            if (isActive)
+              const Icon(Icons.check_circle, color: Colors.green, size: 24)
+            else
+              Icon(
+                Icons.circle_outlined,
+                color: Colors.grey.withAlpha(50),
+                size: 24,
+              ),
+          ],
+        ),
+        const SizedBox(height: 24),
+        Text(
+          'BATCH CONFIGURATION',
+          style: GoogleFonts.outfit(
+            fontSize: 10,
+            fontWeight: FontWeight.bold,
+            color: Colors.grey.shade400,
+            letterSpacing: 1.5,
+          ),
+        ),
+        const SizedBox(height: 16),
+        DropdownButtonFormField<String>(
+          value: selectedCourse,
+          style: GoogleFonts.outfit(fontSize: 14, color: Colors.black),
+          decoration: InputDecoration(
+            labelText: 'Target Course',
+            prefixIcon: const Icon(Icons.class_outlined),
+            filled: true,
+            fillColor: const Color(0xFFF8F9FE),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: BorderSide.none,
+            ),
+          ),
+          isExpanded: true,
+          hint: const Text('Select handled course'),
+          items: AppData().filteredClasses.map((cls) {
+            return DropdownMenuItem<String>(
+              value: cls['id'],
+              child: Text(cls['title'], overflow: TextOverflow.ellipsis),
             );
-          },
-        );
-      },
-    );
-  }
-
-  Widget _buildAdvancedSessionCard({
-    required String label,
-    required String sublabel,
-    required IconData icon,
-    required Color themeColor,
-    required List<dynamic>? data,
-    required TextEditingController titleCtrl,
-    required TextEditingController randomCtrl,
-    required TextEditingController timeCtrl,
-    required bool isTimed,
-    required DateTime start,
-    required DateTime end,
-    required VoidCallback onToggleTimed,
-    required VoidCallback onPickFile,
-    required Function(bool) onPickTime,
-    String? selectedCourse,
-    required Function(String?) onCourseChanged,
-  }) {
-    bool isActive = data != null;
-
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 300),
-      padding: const EdgeInsets.all(32),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(24),
-        boxShadow: [
-          BoxShadow(
-            color: isActive
-                ? themeColor.withAlpha(20)
-                : Colors.black.withAlpha(10),
-            blurRadius: 30,
-            offset: const Offset(0, 15),
-          ),
-        ],
-        border: Border.all(
-          color: isActive
-              ? themeColor.withAlpha(80)
-              : Colors.grey.withAlpha(30),
-          width: isActive ? 2 : 1,
+          }).toList(),
+          onChanged: onCourseChanged,
+          validator: (v) => v == null ? 'Required' : null,
         ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: isActive
-                      ? themeColor.withAlpha(30)
-                      : Colors.grey.withAlpha(20),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Icon(icon, color: isActive ? themeColor : Colors.grey),
-              ),
-              const SizedBox(width: 16),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    label,
-                    style: GoogleFonts.outfit(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16,
-                      color: isActive ? themeColor : Colors.grey.shade800,
-                    ),
-                  ),
-                  Text(
-                    sublabel,
-                    style: GoogleFonts.outfit(fontSize: 12, color: Colors.grey),
-                  ),
-                ],
-              ),
-              const Spacer(),
-              if (isActive)
-                const Icon(Icons.check_circle, color: Colors.green, size: 24)
-              else
-                Icon(
-                  Icons.circle_outlined,
-                  color: Colors.grey.withAlpha(50),
-                  size: 24,
-                ),
-            ],
-          ),
-          const SizedBox(height: 24),
-          Text(
-            'BATCH CONFIGURATION',
-            style: GoogleFonts.outfit(
-              fontSize: 10,
-              fontWeight: FontWeight.bold,
-              color: Colors.grey.shade400,
-              letterSpacing: 1.5,
+        const SizedBox(height: 16),
+        TextField(
+          controller: titleCtrl,
+          style: GoogleFonts.outfit(fontSize: 14),
+          decoration: InputDecoration(
+            labelText: 'Display Title',
+            hintText: 'Enter session name',
+            prefixIcon: const Icon(Icons.edit_note_rounded),
+            filled: true,
+            fillColor: const Color(0xFFF8F9FE),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: BorderSide.none,
             ),
           ),
-          const SizedBox(height: 16),
-          DropdownButtonFormField<String>(
-            value: selectedCourse,
-            style: GoogleFonts.outfit(fontSize: 14, color: Colors.black),
-            decoration: InputDecoration(
-              labelText: 'Target Course',
-              prefixIcon: const Icon(Icons.class_outlined),
-              filled: true,
-              fillColor: const Color(0xFFF8F9FE),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide.none,
-              ),
-            ),
-            isExpanded: true,
-            hint: const Text('Select handled course'),
-            items: AppData().filteredClasses.map((cls) {
-              return DropdownMenuItem<String>(
-                value: cls['id'],
-                child: Text(cls['title'], overflow: TextOverflow.ellipsis),
-              );
-            }).toList(),
-            onChanged: onCourseChanged,
-            validator: (v) => v == null ? 'Required' : null,
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: titleCtrl,
-            style: GoogleFonts.outfit(fontSize: 14),
-            decoration: InputDecoration(
-              labelText: 'Display Title',
-              hintText: 'Enter session name',
-              prefixIcon: const Icon(Icons.edit_note_rounded),
-              filled: true,
-              fillColor: const Color(0xFFF8F9FE),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide.none,
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: randomCtrl,
-                  style: GoogleFonts.outfit(fontSize: 14),
-                  decoration: InputDecoration(
-                    labelText: 'Question Pull',
-                    hintText: 'All',
-                    prefixIcon: const Icon(Icons.shuffle_rounded),
-                    filled: true,
-                    fillColor: const Color(0xFFF8F9FE),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide.none,
-                    ),
-                  ),
-                  keyboardType: TextInputType.number,
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: TextField(
-                  controller: timeCtrl,
-                  enabled: isTimed,
-                  style: GoogleFonts.outfit(fontSize: 14),
-                  decoration: InputDecoration(
-                    labelText: 'Sec/Q',
-                    prefixIcon: const Icon(Icons.timer_rounded),
-                    filled: true,
-                    fillColor: isTimed
-                        ? const Color(0xFFF8F9FE)
-                        : Colors.grey.shade100,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide.none,
-                    ),
-                  ),
-                  keyboardType: TextInputType.number,
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          SwitchListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            title: Text(
-              'Limited Duration Mode',
-              style: GoogleFonts.outfit(
-                fontSize: 12,
-                color: Colors.grey.shade700,
-              ),
-            ),
-            value: isTimed,
-            onChanged: (v) => onToggleTimed(),
-            activeColor: themeColor,
-          ),
-          const SizedBox(height: 24),
-          Text(
-            'TIME WINDOW',
-            style: GoogleFonts.outfit(
-              fontSize: 10,
-              fontWeight: FontWeight.bold,
-              color: Colors.grey.shade400,
-              letterSpacing: 1.5,
-            ),
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: _buildModernTimeBox(
-                  'Starts At',
-                  _formatDateTime12h(start),
-                  () => onPickTime(true),
-                  isActive ? themeColor : Colors.grey,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _buildModernTimeBox(
-                  'Ends At',
-                  _formatDateTime12h(end),
-                  () => onPickTime(false),
-                  isActive ? themeColor : Colors.grey,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 24),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: onPickFile,
-              icon: Icon(
-                isActive
-                    ? Icons.file_present_rounded
-                    : Icons.upload_file_rounded,
-              ),
-              label: Text(isActive ? 'Document Ready' : 'Choose MCQ Data'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: isActive ? themeColor : Colors.grey.shade100,
-                foregroundColor: isActive ? Colors.white : Colors.grey.shade700,
-                padding: const EdgeInsets.symmetric(vertical: 20),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                elevation: 0,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildModernTimeBox(
-    String label,
-    String value,
-    VoidCallback onTap,
-    Color themeColor,
-  ) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: const Color(0xFFF8F9FE),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: Colors.grey.withAlpha(20)),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        const SizedBox(height: 16),
+        Row(
           children: [
-            Text(
-              label,
-              style: GoogleFonts.outfit(
-                fontSize: 9,
-                fontWeight: FontWeight.bold,
-                color: Colors.grey,
+            Expanded(
+              child: TextField(
+                controller: randomCtrl,
+                style: GoogleFonts.outfit(fontSize: 14),
+                decoration: InputDecoration(
+                  labelText: 'Question Pull',
+                  hintText: 'All',
+                  prefixIcon: const Icon(Icons.shuffle_rounded),
+                  filled: true,
+                  fillColor: const Color(0xFFF8F9FE),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+                keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
               ),
             ),
-            const SizedBox(height: 4),
-            Text(
-              value,
-              style: GoogleFonts.outfit(
-                fontSize: 11,
-                fontWeight: FontWeight.bold,
-                color: Colors.black87,
+            const SizedBox(width: 12),
+            Expanded(
+              child: TextField(
+                controller: timeCtrl,
+                enabled: isTimed,
+                style: GoogleFonts.outfit(fontSize: 14),
+                decoration: InputDecoration(
+                  labelText: 'Sec/Q',
+                  prefixIcon: const Icon(Icons.timer_rounded),
+                  filled: true,
+                  fillColor: isTimed
+                      ? const Color(0xFFF8F9FE)
+                      : Colors.grey.shade100,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+                keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
               ),
             ),
           ],
         ),
-      ),
-    );
-  }
+        const SizedBox(height: 8),
+        SwitchListTile(
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          title: Text(
+            'Limited Duration Mode',
+            style: GoogleFonts.outfit(
+              fontSize: 12,
+              color: Colors.grey.shade700,
+            ),
+          ),
+          value: isTimed,
+          onChanged: (v) => onToggleTimed(),
+          activeColor: themeColor,
+        ),
+        SwitchListTile(
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          title: Text(
+            'Anti-Cheat Flagging',
+            style: GoogleFonts.outfit(
+              fontSize: 12,
+              color: Colors.grey.shade700,
+            ),
+          ),
+          value: isFlagged,
+          onChanged: (v) => onToggleFlagged(),
+          activeColor: Colors.redAccent,
+        ),
+        const SizedBox(height: 24),
+        Text(
+          'TIME WINDOW',
+          style: GoogleFonts.outfit(
+            fontSize: 10,
+            fontWeight: FontWeight.bold,
+            color: Colors.grey.shade400,
+            letterSpacing: 1.5,
+          ),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: buildModernTimeBox(
+                'Starts At',
+                _formatDateTime12h(start),
+                () => onPickTime(true),
+                isActive ? themeColor : Colors.grey,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: buildModernTimeBox(
+                'Ends At',
+                _formatDateTime12h(end),
+                () => onPickTime(false),
+                isActive ? themeColor : Colors.grey,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 24),
+        SizedBox(
+          width: double.infinity,
+          child: ElevatedButton.icon(
+            onPressed: onPickFile,
+            icon: Icon(
+              isActive ? Icons.file_present_rounded : Icons.upload_file_rounded,
+            ),
+            label: Text(isActive ? 'Document Ready' : 'Choose MCQ Data'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: isActive ? themeColor : Colors.grey.shade100,
+              foregroundColor: isActive ? Colors.white : Colors.grey.shade700,
+              padding: const EdgeInsets.symmetric(vertical: 20),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              elevation: 0,
+            ),
+          ),
+        ),
+        if (!isActive)
+          Padding(
+            padding: const EdgeInsets.only(top: 8.0),
+            child: Center(
+              child: TextButton.icon(
+                onPressed: () => downloadMcqTemplate(context),
+                icon: const Icon(Icons.download_rounded, size: 16),
+                label: Text(
+                  'Download Template Format',
+                  style: GoogleFonts.outfit(fontSize: 12),
+                ),
+              ),
+            ),
+          ),
+      ],
+    ),
+  );
+}
 
-  Future<DateTime?> _pickDateTime(
-    BuildContext context,
-    DateTime initial,
-  ) async {
-    DateTime? date = await showDatePicker(
+Widget buildModernTimeBox(
+  String label,
+  String value,
+  VoidCallback onTap,
+  Color themeColor,
+) {
+  return InkWell(
+    onTap: onTap,
+    borderRadius: BorderRadius.circular(12),
+    child: Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8F9FE),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.withAlpha(20)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: GoogleFonts.outfit(
+              fontSize: 9,
+              fontWeight: FontWeight.bold,
+              color: Colors.grey,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: GoogleFonts.outfit(
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+              color: Colors.black87,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+Future<DateTime?> pickDateTime(BuildContext context, DateTime initial) async {
+  DateTime? date = await showDatePicker(
+    context: context,
+    initialDate: initial,
+    firstDate: DateTime.now().subtract(const Duration(days: 1)),
+    lastDate: DateTime(2030),
+  );
+  if (date != null) {
+    TimeOfDay? time = await showTimePicker(
       context: context,
-      initialDate: initial,
-      firstDate: DateTime.now().subtract(const Duration(days: 1)),
-      lastDate: DateTime(2030),
+      initialTime: TimeOfDay.fromDateTime(initial),
     );
-    if (date != null) {
-      TimeOfDay? time = await showTimePicker(
-        context: context,
-        initialTime: TimeOfDay.fromDateTime(initial),
+    if (time != null) {
+      return DateTime(date.year, date.month, date.day, time.hour, time.minute);
+    }
+  }
+  return null;
+}
+
+Future<List<dynamic>?> pickMcqFile(BuildContext context) async {
+  var res = await FilePicker.platform.pickFiles(
+    type: FileType.custom,
+    allowedExtensions: ['json', 'xlsx', 'xls', 'csv'],
+    withData: true,
+  );
+  if (res == null || res.files.isEmpty || res.files.first.bytes == null)
+    return null;
+
+  final file = res.files.first;
+  final extension = file.extension?.toLowerCase() ?? '';
+  final bytes = file.bytes!;
+
+  try {
+    if (extension == 'json') {
+      final data = jsonDecode(utf8.decode(bytes));
+      if (data is List) return data;
+      return null;
+    }
+
+    if (extension == 'xlsx' || extension == 'xls') {
+      var excel = ex.Excel.decodeBytes(bytes);
+      List<dynamic> parsedMcq = [];
+
+      for (var table in excel.tables.keys) {
+        var sheet = excel.tables[table];
+        if (sheet == null) continue;
+
+        // Start from index 1 (skip header)
+        for (int i = 1; i < sheet.maxRows; i++) {
+          try {
+            if (i >= sheet.rows.length) break;
+            var row = sheet.rows[i];
+            if (row.isEmpty) continue;
+
+            // Extract Question
+            String question = (row.isNotEmpty && row[0]?.value != null)
+                ? row[0]!.value.toString().trim()
+                : '';
+            if (question.isEmpty) continue;
+
+            // Extract Options (Column 1-4)
+            List<String> options = [];
+            for (int col = 1; col <= 4; col++) {
+              if (row.length > col && row[col]?.value != null) {
+                String opt = row[col]!.value.toString().trim();
+                if (opt.isNotEmpty) options.add(opt);
+              }
+            }
+
+            // Extract Answer (Column 5)
+            String answer = (row.length > 5 && row[5]?.value != null)
+                ? row[5]!.value.toString().trim()
+                : '';
+
+            if (options.isNotEmpty) {
+              parsedMcq.add({
+                'question': question,
+                'options': options,
+                'answer': answer,
+              });
+            }
+          } catch (rowErr) {
+            debugPrint('Error parsing row $i: $rowErr');
+            // Continue to next row
+          }
+        }
+        if (parsedMcq.isNotEmpty) return parsedMcq;
+      }
+      throw Exception(
+        'No valid questions found in Excel file. Check format: Question, Opt1, Opt2, Opt3, Opt4, Answer',
       );
-      if (time != null) {
-        return DateTime(
-          date.year,
-          date.month,
-          date.day,
-          time.hour,
-          time.minute,
+    }
+
+    if (extension == 'csv') {
+      final content = utf8.decode(bytes);
+      final rows = const CsvToListConverter().convert(content);
+      List<dynamic> parsedMcq = [];
+
+      // Start from index 1 (skip header)
+      for (int i = 1; i < rows.length; i++) {
+        final row = rows[i];
+        if (row.isEmpty) continue;
+
+        String question = row[0]?.toString().trim() ?? '';
+        if (question.isEmpty) continue;
+
+        List<String> options = [];
+        for (int col = 1; col <= 4; col++) {
+          if (row.length > col && row[col] != null) {
+            String opt = row[col].toString().trim();
+            if (opt.isNotEmpty) options.add(opt);
+          }
+        }
+
+        String answer = (row.length > 5 && row[5] != null)
+            ? row[5].toString().trim()
+            : '';
+
+        if (options.isNotEmpty) {
+          parsedMcq.add({
+            'question': question,
+            'options': options,
+            'answer': answer,
+          });
+        }
+      }
+      if (parsedMcq.isNotEmpty) return parsedMcq;
+      throw Exception(
+        'No valid questions found in CSV file. Check format: Question, Opt1, Opt2, Opt3, Opt4, Answer',
+      );
+    }
+  } catch (e) {
+    debugPrint('MCQ File Parse Error: $e');
+    if (context.mounted) {
+      String msg = e.toString().contains('null value')
+          ? 'Format Error: Ensure Excel has Question, 4 Options, and Answer columns.'
+          : 'Error parsing file: $e';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(msg), backgroundColor: Colors.redAccent),
+      );
+    }
+  }
+  return null;
+}
+
+Future<void> downloadMcqTemplate(BuildContext context) async {
+  try {
+    var excel = ex.Excel.createExcel();
+    ex.Sheet sheet = excel['Sheet1'];
+
+    // Header row
+    sheet.appendRow([
+      ex.TextCellValue('Question'),
+      ex.TextCellValue('Option A'),
+      ex.TextCellValue('Option B'),
+      ex.TextCellValue('Option C'),
+      ex.TextCellValue('Option D'),
+      ex.TextCellValue('Answer (Must match one of the options text)'),
+    ]);
+
+    // Sample data row
+    sheet.appendRow([
+      ex.TextCellValue('What is the capital of France?'),
+      ex.TextCellValue('London'),
+      ex.TextCellValue('Berlin'),
+      ex.TextCellValue('Paris'),
+      ex.TextCellValue('Madrid'),
+      ex.TextCellValue('Paris'),
+    ]);
+
+    var fileBytes = excel.encode();
+    if (fileBytes != null) {
+      String? outputFile = await FilePicker.platform.saveFile(
+        dialogTitle: 'Save MCQ Template',
+        fileName: 'mcq_template.xlsx',
+        type: FileType.custom,
+        allowedExtensions: ['xlsx'],
+        bytes: Uint8List.fromList(fileBytes),
+      );
+      if (outputFile != null && context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Template saved successfully!')),
         );
       }
     }
-    return null;
-  }
-
-  Future<List<dynamic>?> _pickMcqJson() async {
-    var res = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['json'],
-      withData: true,
-    );
-    if (res != null && res.files.first.bytes != null) {
-      try {
-        final data = jsonDecode(utf8.decode(res.files.first.bytes!));
-        if (data is List) return data;
-      } catch (e) {
-        debugPrint('MCQ JSON Error: $e');
-      }
+  } catch (e) {
+    debugPrint('Template Download Error: $e');
+    if (context.mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error generating template: $e')));
     }
-    return null;
   }
 }
 
@@ -3119,7 +3637,10 @@ class _ProfileViewState extends State<ProfileView> {
               _buildInfoRow('Email Address', AppData().loggedEmail!),
             _buildInfoRow('Phone Number', AppData().loggedPhone ?? 'N/A'),
             if (!isTeacher)
-              _buildInfoRow('Registration No', AppData().loggedEnrollNo ?? 'N/A'),
+              _buildInfoRow(
+                'Registration No',
+                AppData().loggedEnrollNo ?? 'N/A',
+              ),
             if (isTeacher)
               _buildInfoRow('Teacher ID', AppData().loggedTeacherId ?? 'N/A'),
           ],
@@ -3139,7 +3660,10 @@ class _ProfileViewState extends State<ProfileView> {
                       'Designation',
                       AppData().loggedDesignation ?? 'N/A',
                     ),
-                    _buildInfoRow('Academic Year', AppData().loggedYear ?? 'N/A'),
+                    _buildInfoRow(
+                      'Academic Year',
+                      AppData().loggedYear ?? 'N/A',
+                    ),
                     _buildInfoRow(
                       'Current Semester',
                       AppData().loggedSemester ?? 'N/A',
@@ -4314,170 +4838,139 @@ class CoursesView extends StatelessWidget {
       builder: (context, _) => Padding(
         padding: EdgeInsets.all(isMobile ? 16.0 : 40.0),
         child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                'All Courses',
-                style: TextStyle(
-                  fontSize: isMobile ? 20 : 24,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              if (AppData().currentUserRole == UserRole.teacher)
-                ElevatedButton.icon(
-                  onPressed: () => _showAddCourseDialog(context),
-                  icon: const Icon(Icons.add),
-                  label: const Text('Add Course'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF6C5CE7),
-                    foregroundColor: Colors.white,
-                    padding: EdgeInsets.symmetric(
-                      horizontal: isMobile ? 12 : 20,
-                      vertical: isMobile ? 10 : 12,
-                    ),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    elevation: 0,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'All Courses',
+                  style: TextStyle(
+                    fontSize: isMobile ? 20 : 24,
+                    fontWeight: FontWeight.bold,
                   ),
                 ),
-            ],
-          ),
-          SizedBox(height: isMobile ? 16 : 32),
-          Expanded(
-            child: GridView.builder(
-              itemCount: AppData().filteredClasses.length,
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: crossAxisCount,
-                crossAxisSpacing: isMobile ? 16 : 32,
-                mainAxisSpacing: isMobile ? 16 : 32,
-                childAspectRatio: isMobile ? 1.8 : 1.3,
-              ),
-              itemBuilder: (context, index) {
-                final cls = AppData().filteredClasses[index];
-                return GestureDetector(
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => ClassDetailScreen(classData: cls),
-                      ),
-                    );
-                  },
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: Colors.grey.shade200),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withAlpha(10),
-                          blurRadius: 15,
-                          offset: const Offset(0, 5),
-                        ),
-                      ],
-                    ),
-                    clipBehavior: Clip.antiAlias,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Expanded(
-                          flex: 3,
-                          child: Container(
-                            color: cls['color'],
-                            padding: EdgeInsets.all(isMobile ? 16 : 24),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      Text(
-                                        cls['title'],
-                                        style: TextStyle(
-                                          color: Colors.white,
-                                          fontSize: isMobile ? 16 : 20,
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                      Text(
-                                        cls['subtitle'],
-                                        style: TextStyle(
-                                          color: Colors.white.withAlpha(200),
-                                          fontSize: isMobile ? 12 : 14,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                AppData().currentUserRole == UserRole.teacher &&
-                                        AppData().teacherCustomCourses.contains(
-                                          cls['title'],
-                                        )
-                                    ? IconButton(
-                                        icon: const Icon(
-                                          Icons.delete_outline,
-                                          color: Colors.white,
-                                        ),
-                                        tooltip: 'Delete Course',
-                                        onPressed: () {
-                                          _showDeleteConfirmation(
-                                            context,
-                                            cls['title'],
-                                          );
-                                        },
-                                      )
-                                    : Icon(
-                                        Icons.menu_book,
-                                        color: Colors.white.withAlpha(150),
-                                        size: isMobile ? 24 : 32,
-                                      ),
-                              ],
-                            ),
-                          ),
-                        ),
-                        Expanded(
-                          flex: 1,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 20),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Text(
-                                  'Explore Syllabus',
-                                  style: TextStyle(
-                                    fontSize: isMobile ? 11 : 13,
-                                    fontWeight: FontWeight.w600,
-                                    color: Colors.black87,
-                                  ),
-                                ),
-                                Icon(
-                                  Icons.arrow_forward_ios,
-                                  size: 14,
-                                  color: cls['color'],
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              },
+              ],
             ),
-          ),
-        ],
+            SizedBox(height: isMobile ? 16 : 32),
+            Expanded(
+              child: GridView.builder(
+                itemCount: AppData().filteredClasses.length,
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: crossAxisCount,
+                  crossAxisSpacing: isMobile ? 16 : 32,
+                  mainAxisSpacing: isMobile ? 16 : 32,
+                  childAspectRatio: isMobile ? 1.8 : 1.3,
+                ),
+                itemBuilder: (context, index) {
+                  final cls = AppData().filteredClasses[index];
+                  return GestureDetector(
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => ClassDetailScreen(classData: cls),
+                        ),
+                      );
+                    },
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: Colors.grey.shade200),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withAlpha(10),
+                            blurRadius: 15,
+                            offset: const Offset(0, 5),
+                          ),
+                        ],
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Expanded(
+                            flex: 3,
+                            child: Container(
+                              color: cls['color'],
+                              padding: EdgeInsets.all(isMobile ? 16 : 24),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
+                                      children: [
+                                        Text(
+                                          cls['title'],
+                                          style: TextStyle(
+                                            color: Colors.white,
+                                            fontSize: isMobile ? 16 : 20,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                        Text(
+                                          cls['subtitle'],
+                                          style: TextStyle(
+                                            color: Colors.white.withAlpha(200),
+                                            fontSize: isMobile ? 12 : 14,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  Icon(
+                                    Icons.menu_book,
+                                    color: Colors.white.withAlpha(150),
+                                    size: isMobile ? 24 : 32,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            flex: 1,
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 20,
+                              ),
+                              child: Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Text(
+                                    'Explore Syllabus',
+                                    style: TextStyle(
+                                      fontSize: isMobile ? 11 : 13,
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.black87,
+                                    ),
+                                  ),
+                                  Icon(
+                                    Icons.arrow_forward_ios,
+                                    size: 14,
+                                    color: cls['color'],
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
       ),
-    ),
-  );
-}
+    );
+  }
 
   void _showDeleteConfirmation(BuildContext context, String courseName) {
     showDialog(
@@ -4553,7 +5046,9 @@ class CoursesView extends StatelessWidget {
                       ),
                     ),
                   ),
-                  items: AppData().predefinedCourses.map((Map<String, dynamic> course) {
+                  items: AppData().predefinedCourses.map((
+                    Map<String, dynamic> course,
+                  ) {
                     final name = course['name'].toString();
                     return DropdownMenuItem<String>(
                       value: name,
@@ -5579,8 +6074,11 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                         SizedBox(
                           width: double.infinity,
                           child: ElevatedButton.icon(
-                            onPressed: () =>
-                                _openCreateAssignmentDialog(context),
+                            onPressed: () => openCreateAssignmentDialog(
+                              context,
+                              null,
+                              onComplete: () => setState(() {}),
+                            ),
                             icon: const Icon(Icons.add),
                             label: const Text('New Global Assignment'),
                             style: ElevatedButton.styleFrom(
@@ -5607,7 +6105,11 @@ class _AssignmentsViewState extends State<AssignmentsView> {
                       ),
                       if (isTeacher)
                         ElevatedButton.icon(
-                          onPressed: () => _openCreateAssignmentDialog(context),
+                          onPressed: () => openCreateAssignmentDialog(
+                            context,
+                            null,
+                            onComplete: () => setState(() {}),
+                          ),
                           icon: const Icon(Icons.add),
                           label: const Text('Create Global Assignment'),
                           style: ElevatedButton.styleFrom(
@@ -5788,202 +6290,209 @@ class _AssignmentsViewState extends State<AssignmentsView> {
       ),
     );
   }
+} // Added closing brace for class
 
-  void _openCreateAssignmentDialog(BuildContext context) {
-    TextEditingController titleCtrl = TextEditingController();
-    DateTime startDateTime = DateTime.now();
-    DateTime endDateTime = DateTime.now().add(const Duration(days: 7));
-    PlatformFile? pickedFile;
-    List<dynamic>? mcqData;
-    String selectedYear = AppData().loggedYear ?? 'All';
-    String selectedSem = AppData().loggedSemester ?? 'All';
-    String? currentSelectedClassId = AppData().filteredClasses.isNotEmpty
-        ? AppData().filteredClasses.first['id']
-        : null;
+void openCreateAssignmentDialog(
+  BuildContext context,
+  String? manualClassId, {
+  String? paperId,
+  VoidCallback? onComplete,
+}) {
+  TextEditingController titleCtrl = TextEditingController();
+  DateTime startDateTime = DateTime.now();
+  DateTime endDateTime = DateTime.now().add(const Duration(days: 7));
+  PlatformFile? pickedFile;
+  List<dynamic>? mcqData;
+  String selectedYear = AppData().loggedYear ?? 'All';
+  String selectedSem = AppData().loggedSemester ?? 'All';
 
-    showDialog(
-      context: context,
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (ctx, setDialogState) {
-            return AlertDialog(
-              title: const Text('Create New Assignment'),
-              content: SizedBox(
-                width: 400,
-                child: SingleChildScrollView(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const SizedBox(height: 16),
-                      DropdownButtonFormField<String>(
-                        value: currentSelectedClassId,
-                        style: GoogleFonts.outfit(
-                          fontSize: 14,
-                          color: Colors.black,
-                        ),
-                        decoration: const InputDecoration(
-                          labelText: 'Target Course',
-                          prefixIcon: Icon(Icons.class_outlined),
-                          border: OutlineInputBorder(),
-                        ),
-                        isExpanded: true,
-                        hint: const Text('Select handled course'),
-                        items: AppData().filteredClasses.map((cls) {
-                          return DropdownMenuItem<String>(
-                            value: cls['id'],
-                            child: Text(
-                              cls['title'],
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          );
-                        }).toList(),
-                        onChanged: (val) =>
-                            setDialogState(() => currentSelectedClassId = val),
-                        validator: (v) => v == null ? 'Required' : null,
+  String? currentSelectedClassId =
+      manualClassId ??
+      (AppData().filteredClasses.isNotEmpty
+          ? AppData().filteredClasses.first['id']
+          : null);
+
+  showDialog(
+    context: context,
+    builder: (ctx) {
+      return StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          return AlertDialog(
+            title: const Text('Create New Assignment'),
+            content: SizedBox(
+              width: 400,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 16),
+                    DropdownButtonFormField<String>(
+                      value: currentSelectedClassId,
+                      style: GoogleFonts.outfit(
+                        fontSize: 14,
+                        color: Colors.black,
                       ),
-                      const SizedBox(height: 16),
-                      TextField(
-                        controller: titleCtrl,
-                        decoration: const InputDecoration(
-                          labelText: 'Assignment Title',
-                          border: OutlineInputBorder(),
-                        ),
+                      decoration: const InputDecoration(
+                        labelText: 'Target Course',
+                        prefixIcon: Icon(Icons.class_outlined),
+                        border: OutlineInputBorder(),
                       ),
-                      const SizedBox(height: 16),
-                      ListTile(
-                        shape: RoundedRectangleBorder(
-                          side: BorderSide(color: Colors.grey.shade400),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        title: Text(
-                          'Start: ${startDateTime.toString().substring(0, 16)}',
-                        ),
-                        trailing: const Icon(Icons.calendar_month),
-                        onTap: () async {
-                          DateTime? date = await showDatePicker(
+                      isExpanded: true,
+                      hint: const Text('Select handled course'),
+                      items: AppData().filteredClasses.map((cls) {
+                        return DropdownMenuItem<String>(
+                          value: cls['id'],
+                          child: Text(
+                            cls['title'],
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        );
+                      }).toList(),
+                      onChanged: (val) =>
+                          setDialogState(() => currentSelectedClassId = val),
+                      validator: (v) => v == null ? 'Required' : null,
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: titleCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Assignment Title',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    ListTile(
+                      shape: RoundedRectangleBorder(
+                        side: BorderSide(color: Colors.grey.shade400),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      title: Text(
+                        'Start: ${startDateTime.toString().substring(0, 16)}',
+                      ),
+                      trailing: const Icon(Icons.calendar_month),
+                      onTap: () async {
+                        DateTime? date = await showDatePicker(
+                          context: ctx,
+                          initialDate: startDateTime,
+                          firstDate: DateTime.now().subtract(
+                            const Duration(days: 365),
+                          ),
+                          lastDate: DateTime(2030),
+                        );
+                        if (date != null) {
+                          TimeOfDay? time = await showTimePicker(
                             context: ctx,
-                            initialDate: startDateTime,
-                            firstDate: DateTime.now().subtract(
-                              const Duration(days: 365),
-                            ),
-                            lastDate: DateTime(2030),
+                            initialTime: TimeOfDay.fromDateTime(startDateTime),
                           );
-                          if (date != null) {
-                            TimeOfDay? time = await showTimePicker(
-                              context: ctx,
-                              initialTime: TimeOfDay.fromDateTime(
-                                startDateTime,
-                              ),
-                            );
-                            if (time != null) {
-                              setDialogState(() {
-                                startDateTime = DateTime(
-                                  date.year,
-                                  date.month,
-                                  date.day,
-                                  time.hour,
-                                  time.minute,
-                                );
-                              });
-                            }
+                          if (time != null) {
+                            setDialogState(() {
+                              startDateTime = DateTime(
+                                date.year,
+                                date.month,
+                                date.day,
+                                time.hour,
+                                time.minute,
+                              );
+                            });
                           }
-                        },
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    ListTile(
+                      shape: RoundedRectangleBorder(
+                        side: BorderSide(color: Colors.grey.shade400),
+                        borderRadius: BorderRadius.circular(4),
                       ),
-                      const SizedBox(height: 16),
-                      ListTile(
-                        shape: RoundedRectangleBorder(
-                          side: BorderSide(color: Colors.grey.shade400),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        title: Text(
-                          'End: ${endDateTime.toString().substring(0, 16)}',
-                        ),
-                        trailing: const Icon(Icons.calendar_month),
-                        onTap: () async {
-                          DateTime? date = await showDatePicker(
+                      title: Text(
+                        'End: ${endDateTime.toString().substring(0, 16)}',
+                      ),
+                      trailing: const Icon(Icons.calendar_month),
+                      onTap: () async {
+                        DateTime? date = await showDatePicker(
+                          context: ctx,
+                          initialDate: endDateTime,
+                          firstDate: startDateTime,
+                          lastDate: DateTime(2030),
+                        );
+                        if (date != null) {
+                          TimeOfDay? time = await showTimePicker(
                             context: ctx,
-                            initialDate: endDateTime,
-                            firstDate: startDateTime,
-                            lastDate: DateTime(2030),
+                            initialTime: TimeOfDay.fromDateTime(endDateTime),
                           );
-                          if (date != null) {
-                            TimeOfDay? time = await showTimePicker(
-                              context: ctx,
-                              initialTime: TimeOfDay.fromDateTime(endDateTime),
-                            );
-                            if (time != null) {
-                              setDialogState(() {
-                                endDateTime = DateTime(
-                                  date.year,
-                                  date.month,
-                                  date.day,
-                                  time.hour,
-                                  time.minute,
-                                );
-                              });
-                            }
+                          if (time != null) {
+                            setDialogState(() {
+                              endDateTime = DateTime(
+                                date.year,
+                                date.month,
+                                date.day,
+                                time.hour,
+                                time.minute,
+                              );
+                            });
                           }
-                        },
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    OutlinedButton.icon(
+                      onPressed: () async {
+                        var res = await FilePicker.platform.pickFiles();
+                        if (res != null) {
+                          setDialogState(() => pickedFile = res.files.first);
+                        }
+                      },
+                      icon: const Icon(Icons.attach_file),
+                      label: Text(
+                        pickedFile != null
+                            ? pickedFile!.name
+                            : 'Attach Assignment File',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
-                      const SizedBox(height: 16),
-                      OutlinedButton.icon(
-                        onPressed: () async {
-                          var res = await FilePicker.platform.pickFiles();
-                          if (res != null) {
-                            setDialogState(() => pickedFile = res.files.first);
-                          }
-                        },
-                        icon: const Icon(Icons.attach_file),
-                        label: Text(
-                          pickedFile != null
-                              ? pickedFile!.name
-                              : 'Attach Assignment File',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
               ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('Cancel'),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  if (titleCtrl.text.isNotEmpty &&
+                      currentSelectedClassId != null) {
+                    AppData().addAssignment(
+                      currentSelectedClassId!,
+                      titleCtrl.text,
+                      endDateTime.toString().substring(0, 16),
+                      paperId: paperId, // Pass paperId
+                      year: selectedYear,
+                      semester: selectedSem,
+                      file: pickedFile,
+                      mcqData: mcqData,
+                      startDateTime: startDateTime,
+                      dueDateTime: endDateTime,
+                    );
+                    Navigator.pop(ctx);
+                    if (onComplete != null) onComplete();
+                  }
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF6C5CE7),
+                  foregroundColor: Colors.white,
                 ),
-                ElevatedButton(
-                  onPressed: () {
-                    if (titleCtrl.text.isNotEmpty &&
-                        currentSelectedClassId != null) {
-                      AppData().addAssignment(
-                        currentSelectedClassId!,
-                        titleCtrl.text,
-                        endDateTime.toString().substring(0, 16),
-                        year: selectedYear,
-                        semester: selectedSem,
-                        file: pickedFile,
-                        mcqData: mcqData,
-                        startDateTime: startDateTime,
-                        dueDateTime: endDateTime,
-                      );
-                      Navigator.pop(ctx);
-                      setState(() {});
-                    }
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF6C5CE7),
-                    foregroundColor: Colors.white,
-                  ),
-                  child: const Text('Upload Assignment'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-  }
+                child: const Text('Upload Assignment'),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
 }
 
 // ---------------------------------------------------------
@@ -5998,11 +6507,33 @@ class ClassDetailScreen extends StatefulWidget {
 }
 
 class _ClassDetailScreenState extends State<ClassDetailScreen> {
+  List<Map<String, dynamic>> papers = [];
+  bool papersLoading = false;
+
   @override
   void initState() {
     super.initState();
+    _loadPapers();
     // Fetch students enrolled in this course (based on department title)
     AppData().fetchStudentsByDepartment(widget.classData['title']);
+  }
+
+  Future<void> _loadPapers() async {
+    final cId = AppData().getCourseIdByName(widget.classData['title']);
+    if (cId != null) {
+      setState(() => papersLoading = true);
+      try {
+        final p = await AppData().fetchPapersForCourse(cId);
+        if (mounted) {
+          setState(() {
+            papers = p;
+            papersLoading = false;
+          });
+        }
+      } catch (e) {
+        if (mounted) setState(() => papersLoading = false);
+      }
+    }
   }
 
   @override
@@ -6066,9 +6597,11 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                 ? Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      _buildClassworkHeader(isTeacher, classId, isMobile),
+                      if (isTeacher) ...[
+                        _buildPapersSection(isMobile),
+                        const SizedBox(height: 32),
+                      ],
                       const SizedBox(height: 16),
-                      _buildClassworkList(classId, isMobile, isTeacher),
                       const SizedBox(height: 24),
                       _buildUpcomingDueCard(),
                       const SizedBox(height: 24),
@@ -6083,9 +6616,11 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            _buildClassworkHeader(isTeacher, classId, isMobile),
+                            if (isTeacher) ...[
+                              _buildPapersSection(isMobile),
+                              const SizedBox(height: 48),
+                            ],
                             const SizedBox(height: 24),
-                            _buildClassworkList(classId, isMobile, isTeacher),
                           ],
                         ),
                       ),
@@ -6105,164 +6640,6 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
           ],
         ),
       ),
-    );
-  }
-
-  Widget _buildClassworkHeader(bool isTeacher, String classId, bool isMobile) {
-    return isMobile
-        ? Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Classwork',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-              ),
-              if (isTeacher) ...[
-                const SizedBox(height: 8),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: () =>
-                        _openCreateAssignmentDialog(context, classId),
-                    icon: const Icon(Icons.add),
-                    label: const Text('Create Assignment'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF6C5CE7),
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                    ),
-                  ),
-                ),
-              ],
-            ],
-          )
-        : Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text(
-                'Classwork',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-              ),
-              if (isTeacher)
-                ElevatedButton.icon(
-                  onPressed: () =>
-                      _openCreateAssignmentDialog(context, classId),
-                  icon: const Icon(Icons.add),
-                  label: const Text('Create Assignment'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF6C5CE7),
-                    foregroundColor: Colors.white,
-                  ),
-                ),
-            ],
-          );
-  }
-
-  Widget _buildClassworkList(String classId, bool isMobile, bool isTeacher) {
-    return AnimatedBuilder(
-      animation: AppData(),
-      builder: (ctx, _) {
-        List assigns = AppData()
-            .filteredAssignments(classId)
-            .where((a) => a['mcqData'] == null)
-            .toList();
-        if (assigns.isEmpty) return const Text('No assignments yet.');
-
-        return Column(
-          children: assigns.map((a) {
-            return Card(
-              margin: const EdgeInsets.only(bottom: 12),
-              elevation: 0,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-                side: BorderSide(color: Colors.grey.shade200),
-              ),
-              child: InkWell(
-                borderRadius: BorderRadius.circular(16),
-                onTap: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => AssignmentInteractionScreen(
-                        assignment: a,
-                        classColor: widget.classData['color'],
-                        classData: widget.classData,
-                      ),
-                    ),
-                  );
-                },
-                child: Padding(
-                  padding: EdgeInsets.all(isMobile ? 12.0 : 24.0),
-                  child: Row(
-                    children: [
-                      CircleAvatar(
-                        radius: isMobile ? 18 : 24,
-                        backgroundColor: widget.classData['color'].withAlpha(
-                          20,
-                        ),
-                        child: Icon(
-                          Icons.assignment,
-                          color: widget.classData['color'],
-                          size: isMobile ? 18 : 24,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              a['title'],
-                              style: TextStyle(
-                                fontSize: isMobile ? 15 : 18,
-                                fontWeight: FontWeight.bold,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              (a['dueDateTime'] != null)
-                                  ? '${a['dueDateTime'].toString().substring(0, 16)}'
-                                  : 'Due: ${a['dueDate']}',
-                              style: TextStyle(
-                                color: Colors.grey.shade600,
-                                fontSize: isMobile ? 11 : 14,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      if (isTeacher)
-                        IconButton(
-                          icon: const Icon(
-                            Icons.delete_outline,
-                            color: Colors.red,
-                            size: 20,
-                          ),
-                          onPressed: () => _showDeleteConfirmation(
-                            context,
-                            classId,
-                            a['id'],
-                          ),
-                        )
-                      else if ((a['isDone'] ?? false) &&
-                          !(a['isMissed'] ?? false))
-                        const Icon(Icons.check_circle, color: Colors.green)
-                      else if ((a['dueDateTime'] != null &&
-                              DateTime.now().isAfter(a['dueDateTime'])) ||
-                          (a['isMissed'] ?? false))
-                        const Icon(Icons.error_outline, color: Colors.red)
-                      else
-                        const Icon(Icons.pending_actions, color: Colors.orange),
-                    ],
-                  ),
-                ),
-              ),
-            );
-          }).toList(),
-        );
-      },
     );
   }
 
@@ -6421,6 +6798,123 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
           ),
         );
       },
+    );
+  }
+
+  Widget _buildPapersSection(bool isMobile) {
+    if (papersLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (papers.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: Colors.amber.withAlpha(10),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.amber.withAlpha(30)),
+        ),
+        child: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Colors.orange),
+            SizedBox(width: 16),
+            Text('No papers assigned to this course yet.'),
+          ],
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Course Papers',
+          style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 16),
+        GridView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          itemCount: papers.length,
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: isMobile ? 1 : 2,
+            crossAxisSpacing: 16,
+            mainAxisSpacing: 16,
+            mainAxisExtent: 100,
+          ),
+          itemBuilder: (ctx, idx) {
+            final p = papers[idx];
+            return InkWell(
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => PaperDetailScreen(
+                      paperData: p,
+                      classData: widget.classData,
+                    ),
+                  ),
+                );
+              },
+              child: Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.grey.shade200),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withAlpha(5),
+                      blurRadius: 10,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    CircleAvatar(
+                      backgroundColor: widget.classData['color'].withAlpha(20),
+                      child: Icon(
+                        Icons.description,
+                        color: widget.classData['color'],
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            p['paper_name'] ?? 'Unknown Paper',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 16,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          Text(
+                            'ID: ${p['paper_id'] ?? 'N/A'}',
+                            style: TextStyle(
+                              color: Colors.grey.shade600,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Icon(
+                      Icons.arrow_forward_ios_rounded,
+                      size: 16,
+                      color: Colors.grey,
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        ),
+      ],
     );
   }
 
@@ -6635,7 +7129,8 @@ class _AssignmentInteractionScreenState
   bool _isLoadingInstructions = true;
 
   void _loadGlobalInstruction() async {
-    final Map<String, List<String>> result = await AppData().fetchMcqInstruction();
+    final Map<String, List<String>> result = await AppData()
+        .fetchMcqInstruction();
     if (mounted) {
       setState(() {
         _dos = result['dos'] ?? [];
@@ -6708,7 +7203,13 @@ class _AssignmentInteractionScreenState
     bool isTurnedIn = widget.assignment['isDone'] ?? false;
     bool isMcq = widget.assignment['mcqData'] != null;
 
-    if (isStudent && !isTurnedIn && isMcq && _isMcqStartPressed) {
+    bool isFlaggedSetting = widget.assignment['isFlagged'] ?? false;
+
+    if (isStudent &&
+        !isTurnedIn &&
+        isMcq &&
+        _isMcqStartPressed &&
+        isFlaggedSetting) {
       if (state == AppLifecycleState.inactive ||
           state == AppLifecycleState.hidden ||
           state == AppLifecycleState.paused) {
@@ -6739,7 +7240,13 @@ class _AssignmentInteractionScreenState
     bool isTurnedIn = widget.assignment['isDone'] ?? false;
     bool isMcq = widget.assignment['mcqData'] != null;
 
-    if (isStudent && !isTurnedIn && isMcq && _isMcqStartPressed) {
+    bool isFlaggedSetting = widget.assignment['isFlagged'] ?? false;
+
+    if (isStudent &&
+        !isTurnedIn &&
+        isMcq &&
+        _isMcqStartPressed &&
+        isFlaggedSetting) {
       _backPressCount++;
       if (_backPressCount == 1 && !_isWarningDialogShown) {
         _isWarningDialogShown = true;
@@ -6752,7 +7259,7 @@ class _AssignmentInteractionScreenState
         _submitMcq(isFlagged: true);
       }
     } else {
-      // For non-MCQ, already finished, or before test start, just pop normally
+      // For non-MCQ, already finished, or before test start, or if flagging is disabled, just pop normally
       Navigator.pop(context);
     }
   }
@@ -6859,10 +7366,61 @@ class _AssignmentInteractionScreenState
         currentMcqIndex++;
         _startMcqTimer();
       } else {
-        _mcqTimer?.cancel();
-        _submitMcq();
+        int firstUnanswered = -1;
+        for (int i = 0; i < mcqData.length; i++) {
+          if (!mcqAnswers.containsKey(i)) {
+            firstUnanswered = i;
+            break;
+          }
+        }
+
+        if (firstUnanswered != -1 && _mcqTimeLeft != 0) {
+          _showUnansweredWarningDialog(firstUnanswered);
+        } else {
+          _mcqTimer?.cancel();
+          _submitMcq();
+        }
       }
     });
+  }
+
+  void _showUnansweredWarningDialog(int firstUnanswered) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Colors.orange),
+            SizedBox(width: 8),
+            Text('Incomplete Test'),
+          ],
+        ),
+        content: const Text(
+          'You have some unanswered questions and there is still time left. Do you want to go back and complete them, or submit your test now?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _jumpToQuestion(firstUnanswered);
+            },
+            child: const Text('Complete Test'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _mcqTimer?.cancel();
+              _submitMcq();
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: widget.classColor),
+            child: const Text(
+              'Submit Anyway',
+              style: TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   void _jumpToQuestion(int index) {
@@ -7991,29 +8549,58 @@ class _AssignmentInteractionScreenState
                     const Center(child: CircularProgressIndicator())
                   else ...[
                     // Do's
-                    ..._dos.map((point) => Padding(
-                      padding: const EdgeInsets.only(bottom: 12),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Icon(Icons.check_circle_rounded, color: Colors.green, size: 20),
-                          const SizedBox(width: 12),
-                          Expanded(child: Text('Do: $point', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500))),
-                        ],
+                    ..._dos.map(
+                      (point) => Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Icon(
+                              Icons.check_circle_rounded,
+                              color: Colors.green,
+                              size: 20,
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                'Do: $point',
+                                style: const TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    )),
+                    ),
                     // Dont's
-                    ..._donts.map((point) => Padding(
-                      padding: const EdgeInsets.only(bottom: 12),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Icon(Icons.cancel_rounded, color: Colors.red, size: 20),
-                          const SizedBox(width: 12),
-                          Expanded(child: Text('Don''t: $point', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500))),
-                        ],
+                    ..._donts.map(
+                      (point) => Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Icon(
+                              Icons.cancel_rounded,
+                              color: Colors.red,
+                              size: 20,
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                'Don'
+                                't: $point',
+                                style: const TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    )),
+                    ),
                   ],
                   if (!_isLoadingInstructions && _dos.isEmpty && _donts.isEmpty)
                     Container(
@@ -8146,7 +8733,9 @@ class _AssignmentInteractionScreenState
                   ),
                   decoration: const BoxDecoration(
                     color: Colors.white,
-                    border: Border(bottom: BorderSide(color: Color(0xFFE9ECEF))),
+                    border: Border(
+                      bottom: BorderSide(color: Color(0xFFE9ECEF)),
+                    ),
                   ),
                   child: Row(
                     children: [
@@ -8220,9 +8809,17 @@ class _AssignmentInteractionScreenState
                               ),
                             ),
                             const SizedBox(height: 40),
-                            ...List.generate((q['options'] as List).length, (idx) {
-                              bool isSelected = mcqAnswers[currentMcqIndex] == idx;
-                              return _buildOptionInteraction(idx, q['options'][idx].toString(), isSelected, isMobile);
+                            ...List.generate((q['options'] as List).length, (
+                              idx,
+                            ) {
+                              bool isSelected =
+                                  mcqAnswers[currentMcqIndex] == idx;
+                              return _buildOptionInteraction(
+                                idx,
+                                q['options'][idx].toString(),
+                                isSelected,
+                                isMobile,
+                              );
                             }),
                           ],
                         ),
@@ -8233,7 +8830,10 @@ class _AssignmentInteractionScreenState
 
                 // Footer Controls
                 Container(
-                  padding: EdgeInsets.symmetric(horizontal: isMobile ? 16 : 40, vertical: 20),
+                  padding: EdgeInsets.symmetric(
+                    horizontal: isMobile ? 16 : 40,
+                    vertical: 20,
+                  ),
                   decoration: const BoxDecoration(
                     color: Colors.white,
                     border: Border(top: BorderSide(color: Color(0xFFE9ECEF))),
@@ -8244,8 +8844,13 @@ class _AssignmentInteractionScreenState
                         OutlinedButton(
                           onPressed: () => _jumpToQuestion(currentMcqIndex - 1),
                           style: OutlinedButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 24,
+                              vertical: 16,
+                            ),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
                           ),
                           child: const Text('Previous'),
                         ),
@@ -8258,19 +8863,32 @@ class _AssignmentInteractionScreenState
                           });
                           _moveToNextQuestionOrSubmit();
                         },
-                        child: const Text('Skip', style: TextStyle(color: Colors.grey)),
+                        child: const Text(
+                          'Skip',
+                          style: TextStyle(color: Colors.grey),
+                        ),
                       ),
                       const SizedBox(width: 16),
                       ElevatedButton(
                         onPressed: () => _moveToNextQuestionOrSubmit(),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: widget.classColor,
-                          padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 32,
+                            vertical: 16,
+                          ),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
                         ),
                         child: Text(
-                          currentMcqIndex == mcqData.length - 1 ? 'Finish & Submit' : 'Next Question',
-                          style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
+                          currentMcqIndex == mcqData.length - 1
+                              ? 'Finish & Submit'
+                              : 'Next Question',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
                         ),
                       ),
                     ],
@@ -8306,7 +8924,10 @@ class _AssignmentInteractionScreenState
               const SizedBox(width: 12),
               Text(
                 'Navigator',
-                style: GoogleFonts.outfit(fontWeight: FontWeight.bold, fontSize: 18),
+                style: GoogleFonts.outfit(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                ),
               ),
             ],
           ),
@@ -8324,7 +8945,8 @@ class _AssignmentInteractionScreenState
             itemBuilder: (context, index) {
               final isCurrent = currentMcqIndex == index;
               final isAnswered = mcqAnswers.containsKey(index);
-              final isSkipped = _visitedMcqIndices.contains(index) && !isAnswered;
+              final isSkipped =
+                  _visitedMcqIndices.contains(index) && !isAnswered;
 
               Color color = Colors.grey.shade100;
               Color textCol = Colors.grey.shade600;
@@ -8346,12 +8968,22 @@ class _AssignmentInteractionScreenState
                   decoration: BoxDecoration(
                     color: color,
                     borderRadius: BorderRadius.circular(10),
-                    boxShadow: isCurrent ? [BoxShadow(color: color.withAlpha(50), blurRadius: 10)] : [],
+                    boxShadow: isCurrent
+                        ? [
+                            BoxShadow(
+                              color: color.withAlpha(50),
+                              blurRadius: 10,
+                            ),
+                          ]
+                        : [],
                   ),
                   child: Center(
                     child: Text(
                       '${index + 1}',
-                      style: TextStyle(fontWeight: FontWeight.bold, color: textCol),
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: textCol,
+                      ),
                     ),
                   ),
                 ),
@@ -8370,7 +9002,11 @@ class _AssignmentInteractionScreenState
               const SizedBox(height: 10),
               _navigatorLegend(const Color(0xFFDC3545), 'Visited & Skipped'),
               const SizedBox(height: 10),
-              _navigatorLegend(Colors.grey.shade100, 'Not Visited', hasBorder: true),
+              _navigatorLegend(
+                Colors.grey.shade100,
+                'Not Visited',
+                hasBorder: true,
+              ),
             ],
           ),
         ),
@@ -8391,12 +9027,24 @@ class _AssignmentInteractionScreenState
           ),
         ),
         const SizedBox(width: 12),
-        Text(label, style: TextStyle(fontSize: 12, color: Colors.grey.shade700, fontWeight: FontWeight.w500)),
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            color: Colors.grey.shade700,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
       ],
     );
   }
 
-  Widget _buildOptionInteraction(int idx, String text, bool isSelected, bool isMobile) {
+  Widget _buildOptionInteraction(
+    int idx,
+    String text,
+    bool isSelected,
+    bool isMobile,
+  ) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 16),
       child: Material(
@@ -8413,7 +9061,9 @@ class _AssignmentInteractionScreenState
             duration: const Duration(milliseconds: 200),
             padding: EdgeInsets.all(isMobile ? 16 : 24),
             decoration: BoxDecoration(
-              color: isSelected ? widget.classColor.withAlpha(15) : Colors.white,
+              color: isSelected
+                  ? widget.classColor.withAlpha(15)
+                  : Colors.white,
               borderRadius: BorderRadius.circular(16),
               border: Border.all(
                 color: isSelected ? widget.classColor : Colors.grey.shade200,
@@ -8435,10 +9085,17 @@ class _AssignmentInteractionScreenState
                   width: 38,
                   height: 38,
                   decoration: BoxDecoration(
-                    color: isSelected ? widget.classColor : Colors.grey.shade100,
+                    color: isSelected
+                        ? widget.classColor
+                        : Colors.grey.shade100,
                     borderRadius: BorderRadius.circular(12),
                     boxShadow: isSelected
-                        ? [BoxShadow(color: widget.classColor.withAlpha(40), blurRadius: 8)]
+                        ? [
+                            BoxShadow(
+                              color: widget.classColor.withAlpha(40),
+                              blurRadius: 8,
+                            ),
+                          ]
                         : [],
                   ),
                   child: Center(
@@ -8458,8 +9115,12 @@ class _AssignmentInteractionScreenState
                     text,
                     style: GoogleFonts.outfit(
                       fontSize: isMobile ? 16 : 18,
-                      fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-                      color: isSelected ? widget.classColor : const Color(0xFF4A4A68),
+                      fontWeight: isSelected
+                          ? FontWeight.bold
+                          : FontWeight.w500,
+                      color: isSelected
+                          ? widget.classColor
+                          : const Color(0xFF4A4A68),
                     ),
                   ),
                 ),
@@ -8473,7 +9134,12 @@ class _AssignmentInteractionScreenState
     );
   }
 
-  Widget _buildTimerBadge(IconData icon, String val, String label, Color color) {
+  Widget _buildTimerBadge(
+    IconData icon,
+    String val,
+    String label,
+    Color color,
+  ) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       decoration: BoxDecoration(
@@ -9440,7 +10106,7 @@ class _AssignmentInteractionScreenState
                   ]);
                 }
 
-                var fileBytes = excel.save();
+                var fileBytes = excel.encode();
                 if (fileBytes != null) {
                   String? outputFile = await FilePicker.platform.saveFile(
                     dialogTitle: 'Select Save Location',
