@@ -186,6 +186,7 @@ class AppData extends ChangeNotifier {
   List<Map<String, dynamic>> registeredStudents = [];
   List<Map<String, dynamic>> internalStudents = [];
   List<String> activeDepartments = [];
+  Map<String, Map<String, String>> departmentTeacherMap = {};
   List<Map<String, dynamic>> enrolledStudents = [];
 
   Future<void> fetchStudentsByDepartment(String dept) async {
@@ -231,8 +232,10 @@ class AppData extends ChangeNotifier {
 
   // Helper to find numeric course ID by name
   int? getCourseIdByName(String name) {
+    if (name.isEmpty) return null;
+    final search = name.trim().toLowerCase();
     for (var c in predefinedCourses) {
-      if (c['name'].toString().toLowerCase() == name.toLowerCase()) {
+      if (c['name'].toString().trim().toLowerCase() == search) {
         return c['id'] as int?;
       }
     }
@@ -339,37 +342,57 @@ class AppData extends ChangeNotifier {
       courseColor = Colors.deepPurple.shade400;
     }
 
+    String tName = 'N/A';
+    String tDesig = 'Faculty';
+
+    if (currentUserRole == UserRole.teacher) {
+      tName = loggedName ?? 'N/A';
+      tDesig = loggedDesignation ?? 'Professor';
+    } else {
+      // Lookup from map for students
+      final info = departmentTeacherMap[dept];
+      if (info != null) {
+        tName = info['name'] ?? 'N/A';
+        tDesig = info['designation'] ?? 'Faculty';
+      }
+    }
+
     return {
-      'id': 'dept_${dept.replaceAll(' ', '_').toLowerCase()}',
+      'id': _normalizeClassId(dept),
       'title': dept,
       'subtitle': currentUserRole == UserRole.teacher
-          ? 'Prof. $loggedName'
-          : 'Faculty Course',
-      'teacherName': loggedName ?? 'N/A',
-      'teacherDesignation': loggedDesignation ?? 'Professor',
+          ? 'Prof. $tName'
+          : 'Faculty: $tName',
+      'teacherName': tName,
+      'teacherDesignation': tDesig,
       'color': courseColor,
       'progress': 0.50,
       'time': '00:00:00',
     };
   }
 
+  String _normalizeClassId(String id) {
+    if (id.startsWith('dept_')) return id;
+    return 'dept_${id.trim().replaceAll(' ', '_').toLowerCase()}';
+  }
+
   List<Map<String, dynamic>> filteredAssignments(String classId) {
-    final list = classAssignments[classId];
-    if (list == null) return [];
+    // Ensure we handle both raw and prefixed IDs for robustness
+    final normalizedId = _normalizeClassId(classId);
+
+    final list = classAssignments[normalizedId] ?? classAssignments[classId] ?? [];
 
     // Filter by Year/Sem for BOTH students and teachers
     return list.where((a) {
-      final targetYear = a['year']?.toString().trim() ?? 'All';
-      final targetSem = a['semester']?.toString().trim() ?? 'All';
+      final targetYear = a['year']?.toString().trim().toLowerCase() ?? 'all';
+      final targetSem = a['semester']?.toString().trim().toLowerCase() ?? 'all';
+
+      final userYear = loggedYear?.trim().toLowerCase() ?? '';
+      final userSem = loggedSemester?.trim().toLowerCase() ?? '';
 
       // "All" is a wildcard that matches everyone
-      bool yearMatch =
-          targetYear == 'All' ||
-          targetYear.toLowerCase() == (loggedYear?.toLowerCase().trim() ?? '');
-      bool semMatch =
-          targetSem == 'All' ||
-          targetSem.toLowerCase() ==
-              (loggedSemester?.toLowerCase().trim() ?? '');
+      bool yearMatch = targetYear == 'all' || targetYear == userYear;
+      bool semMatch = targetSem == 'all' || targetSem == userSem;
 
       return yearMatch && semMatch;
     }).toList();
@@ -516,12 +539,25 @@ class AppData extends ChangeNotifier {
     try {
       final data = await supabase
           .from('teacher_register_details')
-          .select('department');
-      final List<String> depts = (data as List)
+          .select('department, name, designation');
+      final List<Map<String, dynamic>> rows = List<Map<String, dynamic>>.from(data as List);
+      final List<String> depts = rows
           .map((e) => e['department']?.toString() ?? '')
           .where((d) => d.isNotEmpty)
           .toSet()
           .toList();
+      
+      departmentTeacherMap.clear();
+      for (var row in rows) {
+        String d = row['department']?.toString() ?? '';
+        if (d.isNotEmpty) {
+          departmentTeacherMap[d] = {
+            'name': row['name']?.toString() ?? 'N/A',
+            'designation': row['designation']?.toString() ?? 'Faculty',
+          };
+        }
+      }
+
       activeDepartments = depts;
       notifyListeners();
     } catch (e) {
@@ -1449,18 +1485,39 @@ class AppData extends ChangeNotifier {
     // Persist to Supabase
     try {
       if (mcqData != null) {
-        await supabase.from('teacher_mcq_content').insert({
+        final Map<String, dynamic> mcqPayload = {
           'id': newId,
           'class_id': classId,
           'title': title,
           'due_datetime': dueDateTime?.toUtc().toIso8601String(),
           'start_datetime': startDateTime?.toUtc().toIso8601String(),
           'mcq_data': mcqData,
+          'year': year,
+          'semester': semester,
           'time_per_question': timePerQuestion,
           'random_question_count': questionsToShow,
-          'paper_id': paperId, // Reference paper
           'is_flagged': isFlagged,
-        });
+          'paper_id': paperId,
+        };
+
+        try {
+          await supabase.from('teacher_mcq_content').insert(mcqPayload);
+        } catch (e) {
+          debugPrint('Supabase insert failed with extra columns, retrying basic: $e');
+          // Retry with basic columns only
+          await supabase.from('teacher_mcq_content').insert({
+            'id': newId,
+            'class_id': classId,
+            'title': title,
+            'due_datetime': dueDateTime?.toUtc().toIso8601String(),
+            'start_datetime': startDateTime?.toUtc().toIso8601String(),
+            'mcq_data': mcqData,
+            'year': year,
+            'semester': semester,
+            'time_per_question': timePerQuestion,
+            'random_question_count': questionsToShow,
+          });
+        }
       } else {
         // UPLOAD TEACHER FILE IF EXISTS
         if (file != null) {
@@ -1583,8 +1640,10 @@ class AppData extends ChangeNotifier {
   }
 
   void _processAssignmentRow(Map<String, dynamic> row, {required bool isMcq}) {
-    final classId = row['class_id'] as String?;
-    if (classId == null) return;
+    String? rawId = row['class_id'] as String?;
+    if (rawId == null) return;
+    final classId = _normalizeClassId(rawId);
+
     classAssignments.putIfAbsent(classId, () => []);
 
     // Avoid duplicates
@@ -1605,6 +1664,9 @@ class AppData extends ChangeNotifier {
         'mcqData': row['mcq_data'],
         'timePerQuestion': row['time_per_question'] ?? 30,
         'questionsToShow': row['random_question_count'],
+        'isFlagged': row['is_flagged'] ?? false,
+        'paperId': (row['paper_id'] != null && row['paper_id'].toString().trim().isNotEmpty) ? row['paper_id'] : null,
+        'isFlagged': row['is_flagged'] ?? false,
         'isDone': false,
       });
     }
@@ -2168,7 +2230,7 @@ class McqCentralView extends StatefulWidget {
 }
 
 class _McqCentralViewState extends State<McqCentralView> {
-  Set<int> selectedIndices = {};
+  Set<String> selectedIds = {};
   bool isSelectionMode = false;
 
   @override
@@ -2185,28 +2247,31 @@ class _McqCentralViewState extends State<McqCentralView> {
     final screenWidth = MediaQuery.of(context).size.width;
     final isMobile = screenWidth < 800;
 
-    // Flatten assignments that have mcqData
-    List<Map<String, dynamic>> allMcqTests = [];
-    for (var cls in AppData().filteredClasses) {
-      var assigns = AppData().filteredAssignments(cls['id'] ?? '');
-      for (var a in assigns) {
-        if (a['mcqData'] != null) {
-          allMcqTests.add({'classData': cls, 'assignment': a});
+    return ListenableBuilder(
+      listenable: AppData(),
+      builder: (context, _) {
+        // Flatten assignments that have mcqData
+        List<Map<String, dynamic>> allMcqTests = [];
+        for (var cls in AppData().filteredClasses) {
+          var assigns = AppData().filteredAssignments(cls['id'] ?? '');
+          for (var a in assigns) {
+            if (a['mcqData'] != null) {
+              allMcqTests.add({'classData': cls, 'assignment': a});
+            }
+          }
         }
-      }
-    }
 
-    return Scaffold(
-      backgroundColor: Colors.transparent,
-      body: RefreshIndicator(
-        onRefresh: () => AppData().loadAssignmentsFromSupabase(),
-        color: const Color(0xFF6C5CE7),
-        child: Padding(
-          padding: EdgeInsets.all(isMobile ? 12.0 : 40.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              isMobile
+        return Scaffold(
+          backgroundColor: Colors.transparent,
+          body: RefreshIndicator(
+            onRefresh: () => AppData().loadAssignmentsFromSupabase(),
+            color: const Color(0xFF6C5CE7),
+            child: Padding(
+              padding: EdgeInsets.all(isMobile ? 12.0 : 40.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  isMobile
                   ? Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -2220,7 +2285,7 @@ class _McqCentralViewState extends State<McqCentralView> {
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
-                            if (isTeacher && selectedIndices.isNotEmpty)
+                            if (isTeacher && selectedIds.isNotEmpty)
                               IconButton(
                                 icon: const Icon(
                                   Icons.download_for_offline,
@@ -2266,14 +2331,14 @@ class _McqCentralViewState extends State<McqCentralView> {
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
-                            if (isTeacher && selectedIndices.isNotEmpty) ...[
+                            if (isTeacher && selectedIds.isNotEmpty) ...[
                               const SizedBox(width: 16),
                               ElevatedButton.icon(
                                 onPressed: () =>
                                     _bulkDownloadMarks(allMcqTests),
                                 icon: const Icon(Icons.download_rounded),
                                 label: Text(
-                                  'Download Marks (${selectedIndices.length})',
+                                  'Download Marks (${selectedIds.length})',
                                 ),
                                 style: ElevatedButton.styleFrom(
                                   backgroundColor: Colors.white,
@@ -2305,19 +2370,37 @@ class _McqCentralViewState extends State<McqCentralView> {
               SizedBox(height: isMobile ? 16 : 32),
               Expanded(
                 child: allMcqTests.isEmpty
-                    ? const Center(
-                        child: Text(
-                          'No MCQ Tests available.',
-                          style: TextStyle(color: Colors.grey, fontSize: 16),
+                    ? Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.quiz_outlined, size: 64, color: Colors.grey.shade300),
+                            const SizedBox(height: 16),
+                            Text(
+                              'No pending MCQ Tests found for your department.',
+                              style: TextStyle(color: Colors.grey.shade500, fontSize: 16),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Checked: ${AppData().loggedDepartment ?? 'Unset'}',
+                              style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                            ),
+                            const SizedBox(height: 24),
+                            TextButton.icon(
+                              onPressed: () => AppData().loadAssignmentsFromSupabase(),
+                              icon: const Icon(Icons.refresh),
+                              label: const Text('Refresh Data'),
+                            ),
+                          ],
                         ),
                       )
                     : ListView.builder(
                         itemCount: allMcqTests.length,
-                        itemBuilder: (ctx, i) {
-                          var item = allMcqTests[i];
-                          var cls = item['classData'];
+                        padding: const EdgeInsets.only(bottom: 100),
+                        itemBuilder: (ctx, idx) {
+                          var item = allMcqTests[idx];
                           var a = item['assignment'];
-
+                          var cls = item['classData'];
                           return Card(
                             margin: const EdgeInsets.only(bottom: 12),
                             elevation: 0,
@@ -2328,6 +2411,17 @@ class _McqCentralViewState extends State<McqCentralView> {
                             child: InkWell(
                               borderRadius: BorderRadius.circular(16),
                               onTap: () {
+                                if (isSelectionMode) {
+                                  setState(() {
+                                    if (selectedIds.contains(a['id'])) {
+                                      selectedIds.remove(a['id']);
+                                      if (selectedIds.isEmpty) isSelectionMode = false;
+                                    } else {
+                                      selectedIds.add(a['id']!);
+                                    }
+                                  });
+                                  return;
+                                }
                                 Navigator.push(
                                   context,
                                   MaterialPageRoute(
@@ -2342,7 +2436,8 @@ class _McqCentralViewState extends State<McqCentralView> {
                               onLongPress: isTeacher
                                   ? () {
                                       setState(() {
-                                        selectedIndices.add(i);
+                                        isSelectionMode = true;
+                                        selectedIds.add(a['id']);
                                       });
                                     }
                                   : null,
@@ -2359,13 +2454,14 @@ class _McqCentralViewState extends State<McqCentralView> {
                                           onTap:
                                               () {}, // Prevent card tap when clicking checkbox
                                           child: Checkbox(
-                                            value: selectedIndices.contains(i),
+                                            value: selectedIds.contains(a['id']),
                                             onChanged: (val) {
                                               setState(() {
                                                 if (val == true) {
-                                                  selectedIndices.add(i);
+                                                  selectedIds.add(a['id']);
                                                 } else {
-                                                  selectedIndices.remove(i);
+                                                  selectedIds.remove(a['id']);
+                                                  if (selectedIds.isEmpty) isSelectionMode = false;
                                                 }
                                               });
                                             },
@@ -2476,19 +2572,25 @@ class _McqCentralViewState extends State<McqCentralView> {
                           );
                         },
                       ),
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
   Future<void> _bulkDownloadMarks(List<Map<String, dynamic>> allTests) async {
     List<Map<String, dynamic>> testsToExport = [];
-    for (int idx in selectedIndices) {
-      if (idx < allTests.length) {
-        testsToExport.add(allTests[idx]);
+    for (String id in selectedIds) {
+      final test = allTests.firstWhere(
+        (t) => t['assignment']['id'] == id,
+        orElse: () => {},
+      );
+      if (test.isNotEmpty) {
+        testsToExport.add(test);
       }
     }
 
@@ -2620,7 +2722,8 @@ class _McqCentralViewState extends State<McqCentralView> {
     }
 
     setState(() {
-      selectedIndices.clear();
+      selectedIds.clear();
+      isSelectionMode = false;
     });
   }
 
@@ -2802,10 +2905,6 @@ void openCreateMcqTestDialog(
                                     if (res != null) {
                                       setDialogState(() {
                                         s['mcqData'] = res;
-                                        if (s['titleCtrl'].text.isEmpty) {
-                                          s['titleCtrl'].text =
-                                              '${s['label']} Test';
-                                        }
                                       });
                                     }
                                   },
@@ -2850,18 +2949,18 @@ void openCreateMcqTestDialog(
                       OutlinedButton.icon(
                         onPressed: () {
                           setDialogState(() {
+                            // Inherit from last session
+                            var last = sessions.last;
                             sessions.add({
-                              'titleCtrl': TextEditingController(),
-                              'timeCtrl': TextEditingController(text: '30'),
-                              'randomCtrl': TextEditingController(),
-                              'isTimed': false,
-                              'isFlagged': false,
-                              'start': DateTime.now(),
-                              'end': DateTime.now().add(
-                                const Duration(hours: 3),
-                              ),
-                              'mcqData': null,
-                              'selectedClassId': defaultClassId,
+                              'titleCtrl': TextEditingController(), // Must be NEW
+                              'timeCtrl': TextEditingController(text: last['timeCtrl'].text), // Inherit
+                              'randomCtrl': TextEditingController(text: last['randomCtrl'].text), // Inherit
+                              'isTimed': last['isTimed'], // Inherit
+                              'isFlagged': last['isFlagged'], // Inherit
+                              'start': last['start'], // Inherit
+                              'end': last['end'], // Inherit
+                              'mcqData': null, // Must be NEW
+                              'selectedClassId': last['selectedClassId'], // Inherit
                               'label': 'Session ${sessions.length + 1}',
                             });
                           });
@@ -2949,37 +3048,30 @@ void openCreateMcqTestDialog(
               const SizedBox(width: 8),
               ElevatedButton(
                 onPressed: () async {
-                  if (activeSessions == 0) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text(
-                          'Please upload at least one JSON or Excel file',
-                        ),
-                      ),
-                    );
-                    return;
+                  // Strict Validation: Every session must be complete
+                  for (var s in sessions) {
+                    if (s['selectedClassId'] == null) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Please select a course for ${s['label']}')),
+                      );
+                      return;
+                    }
+                    if (s['titleCtrl'].text.trim().isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Display Title required for ${s['label']}')),
+                      );
+                      return;
+                    }
+                    if (s['mcqData'] == null) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Please upload MCQ data for ${s['label']}')),
+                      );
+                      return;
+                    }
                   }
 
                   for (var s in sessions) {
                     if (s['mcqData'] != null) {
-                      if (s['selectedClassId'] == null) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              'Please select a course for ${s['label']}',
-                            ),
-                          ),
-                        );
-                        return;
-                      }
-                      if (s['titleCtrl'].text.isEmpty) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text('Title required for ${s['label']}'),
-                          ),
-                        );
-                        return;
-                      }
                       await AppData().addAssignment(
                         s['selectedClassId'],
                         s['titleCtrl'].text,
@@ -3404,34 +3496,52 @@ Future<List<dynamic>?> pickMcqFile(BuildContext context) async {
         var sheet = excel.tables[table];
         if (sheet == null) continue;
 
-        // Start from index 1 (skip header)
-        for (int i = 1; i < sheet.maxRows; i++) {
+        // Robust extraction helper
+        String getCellValue(ex.Data? data) {
+          if (data == null || data.value == null) return '';
+          var v = data.value;
+          if (v is ex.TextCellValue) return v.value.toString().trim();
+          if (v is ex.IntCellValue) return v.value.toString().trim();
+          if (v is ex.DoubleCellValue) return v.value.toString().trim();
+          if (v is ex.BoolCellValue) return v.value.toString().trim();
+          return v.toString().trim();
+        }
+
+        // Search for the data starting point (first row with a question)
+        int startRow = 1; // Default skip index 0 header
+        for (int i = 0; i < sheet.maxRows && i < 10; i++) {
+          if (i >= sheet.rows.length) break;
+          String cellA = getCellValue(sheet.rows[i].isNotEmpty ? sheet.rows[i][0] : null).toLowerCase();
+          String cellB = getCellValue(sheet.rows[i].length > 1 ? sheet.rows[i][1] : null).toLowerCase();
+          if (cellA.contains('qno') || cellB.contains('question')) {
+            startRow = i + 1;
+            break;
+          }
+        }
+
+        for (int i = startRow; i < sheet.maxRows; i++) {
           try {
             if (i >= sheet.rows.length) break;
             var row = sheet.rows[i];
             if (row.isEmpty) continue;
 
-            // Extract Question
-            String question = (row.isNotEmpty && row[0]?.value != null)
-                ? row[0]!.value.toString().trim()
-                : '';
+            // Question is Column B (index 1)
+            String question = getCellValue(row.length > 1 ? row[1] : null);
             if (question.isEmpty) continue;
 
-            // Extract Options (Column 1-4)
+            // Options are Columns C-F (index 2-5)
             List<String> options = [];
-            for (int col = 1; col <= 4; col++) {
-              if (row.length > col && row[col]?.value != null) {
-                String opt = row[col]!.value.toString().trim();
+            for (int col = 2; col <= 5; col++) {
+              if (row.length > col) {
+                String opt = getCellValue(row[col]);
                 if (opt.isNotEmpty) options.add(opt);
               }
             }
 
-            // Extract Answer (Column 5)
-            String answer = (row.length > 5 && row[5]?.value != null)
-                ? row[5]!.value.toString().trim()
-                : '';
+            // Answer is Column G (index 6)
+            String answer = getCellValue(row.length > 6 ? row[6] : null);
 
-            if (options.isNotEmpty) {
+            if (options.length >= 2) {
               parsedMcq.add({
                 'question': question,
                 'options': options,
@@ -3440,13 +3550,12 @@ Future<List<dynamic>?> pickMcqFile(BuildContext context) async {
             }
           } catch (rowErr) {
             debugPrint('Error parsing row $i: $rowErr');
-            // Continue to next row
           }
         }
         if (parsedMcq.isNotEmpty) return parsedMcq;
       }
       throw Exception(
-        'No valid questions found in Excel file. Check format: Question, Opt1, Opt2, Opt3, Opt4, Answer',
+        'No valid questions found. Ensure Excel format: QNo, Question, Option A, Option B, Option C, Option D, Correct Answer',
       );
     }
 
@@ -3460,22 +3569,22 @@ Future<List<dynamic>?> pickMcqFile(BuildContext context) async {
         final row = rows[i];
         if (row.isEmpty) continue;
 
-        String question = row[0]?.toString().trim() ?? '';
+        String question = (row.length > 1) ? row[1]?.toString().trim() ?? '' : '';
         if (question.isEmpty) continue;
 
         List<String> options = [];
-        for (int col = 1; col <= 4; col++) {
+        for (int col = 2; col <= 5; col++) {
           if (row.length > col && row[col] != null) {
             String opt = row[col].toString().trim();
             if (opt.isNotEmpty) options.add(opt);
           }
         }
 
-        String answer = (row.length > 5 && row[5] != null)
-            ? row[5].toString().trim()
+        String answer = (row.length > 6 && row[6] != null)
+            ? row[6].toString().trim()
             : '';
 
-        if (options.isNotEmpty) {
+        if (options.length >= 2) {
           parsedMcq.add({
             'question': question,
             'options': options,
@@ -3485,15 +3594,15 @@ Future<List<dynamic>?> pickMcqFile(BuildContext context) async {
       }
       if (parsedMcq.isNotEmpty) return parsedMcq;
       throw Exception(
-        'No valid questions found in CSV file. Check format: Question, Opt1, Opt2, Opt3, Opt4, Answer',
+        'No valid questions found in CSV file. Check format: QNo, Question, Option A, Option B, Option C, Option D, Correct Answer',
       );
     }
   } catch (e) {
     debugPrint('MCQ File Parse Error: $e');
     if (context.mounted) {
       String msg = e.toString().contains('null value')
-          ? 'Format Error: Ensure Excel has Question, 4 Options, and Answer columns.'
-          : 'Error parsing file: $e';
+          ? 'Format Error: Ensure Excel has QNo, Question, 4 Options, and Correct Answer columns.'
+          : 'Failed to pick or parse the MCQ file.';
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(msg), backgroundColor: Colors.redAccent),
       );
@@ -3509,16 +3618,18 @@ Future<void> downloadMcqTemplate(BuildContext context) async {
 
     // Header row
     sheet.appendRow([
+      ex.TextCellValue('QNo'),
       ex.TextCellValue('Question'),
       ex.TextCellValue('Option A'),
       ex.TextCellValue('Option B'),
       ex.TextCellValue('Option C'),
       ex.TextCellValue('Option D'),
-      ex.TextCellValue('Answer (Must match one of the options text)'),
+      ex.TextCellValue('Correct Answer (Must match one of the options text)'),
     ]);
 
     // Sample data row
     sheet.appendRow([
+      ex.IntCellValue(1),
       ex.TextCellValue('What is the capital of France?'),
       ex.TextCellValue('London'),
       ex.TextCellValue('Berlin'),
@@ -4264,18 +4375,11 @@ class DashboardView extends StatelessWidget {
                         ),
                         const SizedBox(width: 12),
                         _buildStatCard(
-                          isTeacher
-                              ? 'Assignments Created'
-                              : 'Pending Assignments',
+                          isTeacher ? 'Assignments' : 'Pending Tasks',
                           AppData().filteredClasses
-                              .expand(
-                                (cls) => AppData().filteredAssignments(
-                                  cls['id'] ?? '',
-                                ),
-                              )
+                              .expand((cls) => AppData().filteredAssignments(cls['id'] ?? ''))
                               .where((a) => !a['isDone'])
-                              .length
-                              .toString(),
+                              .length.toString(),
                           Icons.assignment,
                           Colors.orange,
                         ),
@@ -4285,24 +4389,22 @@ class DashboardView extends StatelessWidget {
                     Row(
                       children: [
                         _buildStatCard(
-                          isTeacher ? 'Submissions' : 'Completed Work',
+                          isTeacher ? 'Submissions' : 'Completed',
                           AppData().filteredClasses
-                              .expand(
-                                (cls) => AppData().filteredAssignments(
-                                  cls['id'] ?? '',
-                                ),
-                              )
+                              .expand((cls) => AppData().filteredAssignments(cls['id'] ?? ''))
                               .where((a) => a['isDone'])
-                              .length
-                              .toString(),
+                              .length.toString(),
                           Icons.check_circle,
                           Colors.green,
                         ),
                         const SizedBox(width: 12),
                         _buildStatCard(
-                          'Upcoming Class',
-                          'Tomorrow',
-                          Icons.calendar_month,
+                          'Upcoming Tests',
+                          AppData().filteredClasses
+                              .expand((cls) => AppData().filteredAssignments(cls['id'] ?? ''))
+                              .where((a) => a['mcqData'] != null && !a['isDone'])
+                              .length.toString(),
+                          Icons.quiz,
                           const Color(0xFF6C5CE7),
                         ),
                       ],
@@ -4319,15 +4421,11 @@ class DashboardView extends StatelessWidget {
                     ),
                     const SizedBox(width: 24),
                     _buildStatCard(
-                      isTeacher ? 'Assignments Created' : 'Pending Assignments',
+                      isTeacher ? 'Assignments' : 'Pending Tasks',
                       AppData().filteredClasses
-                          .expand(
-                            (cls) =>
-                                AppData().filteredAssignments(cls['id'] ?? ''),
-                          )
+                          .expand((cls) => AppData().filteredAssignments(cls['id'] ?? ''))
                           .where((a) => !a['isDone'])
-                          .length
-                          .toString(),
+                          .length.toString(),
                       Icons.assignment,
                       Colors.orange,
                     ),
@@ -4335,21 +4433,20 @@ class DashboardView extends StatelessWidget {
                     _buildStatCard(
                       isTeacher ? 'Submissions' : 'Completed Work',
                       AppData().filteredClasses
-                          .expand(
-                            (cls) =>
-                                AppData().filteredAssignments(cls['id'] ?? ''),
-                          )
+                          .expand((cls) => AppData().filteredAssignments(cls['id'] ?? ''))
                           .where((a) => a['isDone'])
-                          .length
-                          .toString(),
+                          .length.toString(),
                       Icons.check_circle,
                       Colors.green,
                     ),
                     const SizedBox(width: 24),
                     _buildStatCard(
-                      'Upcoming Class',
-                      'Tomorrow',
-                      Icons.calendar_month,
+                      'Upcoming Tests',
+                      AppData().filteredClasses
+                          .expand((cls) => AppData().filteredAssignments(cls['id'] ?? ''))
+                          .where((a) => a['mcqData'] != null && !a['isDone'])
+                          .length.toString(),
+                      Icons.quiz,
                       const Color(0xFF6C5CE7),
                     ),
                   ],
@@ -6519,6 +6616,11 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
   }
 
   Future<void> _loadPapers() async {
+    // Ensure predefinedCourses are loaded for name -> ID mapping
+    if (AppData().predefinedCourses.isEmpty) {
+      await AppData().fetchPredefinedCourses();
+    }
+
     final cId = AppData().getCourseIdByName(widget.classData['title']);
     if (cId != null) {
       setState(() => papersLoading = true);
@@ -6597,15 +6699,14 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                 ? Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      if (isTeacher) ...[
-                        _buildPapersSection(isMobile),
-                        const SizedBox(height: 32),
-                      ],
+                      _buildPapersSection(isMobile),
+                      const SizedBox(height: 32),
                       const SizedBox(height: 16),
-                      const SizedBox(height: 24),
                       _buildUpcomingDueCard(),
-                      const SizedBox(height: 24),
-                      _buildEnrolledStudentsSection(isMobile),
+                      if (AppData().currentUserRole == UserRole.teacher) ...[
+                        const SizedBox(height: 24),
+                        _buildEnrolledStudentsSection(isMobile),
+                      ],
                     ],
                   )
                 : Row(
@@ -6616,22 +6717,20 @@ class _ClassDetailScreenState extends State<ClassDetailScreen> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            if (isTeacher) ...[
-                              _buildPapersSection(isMobile),
-                              const SizedBox(height: 48),
-                            ],
-                            const SizedBox(height: 24),
+                            _buildPapersSection(isMobile),
                           ],
                         ),
                       ),
                       const SizedBox(width: 32),
-                      Expanded(
-                        flex: 1,
+                      SizedBox(
+                        width: 380,
                         child: Column(
                           children: [
                             _buildUpcomingDueCard(),
-                            const SizedBox(height: 24),
-                            _buildEnrolledStudentsSection(isMobile),
+                            if (AppData().currentUserRole == UserRole.teacher) ...[
+                              const SizedBox(height: 24),
+                              _buildEnrolledStudentsSection(isMobile),
+                            ],
                           ],
                         ),
                       ),

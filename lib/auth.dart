@@ -44,7 +44,7 @@ class _LoginScreenState extends State<LoginScreen> {
         if (mounted) setState(() => _studentName = null);
         return;
       }
-      
+
       final name = await AppData().fetchUserName(id);
       if (mounted) {
         setState(() => _studentName = name);
@@ -64,11 +64,11 @@ class _LoginScreenState extends State<LoginScreen> {
     }
 
     setState(() => _isLoading = true);
-    AppData().loginErrorMessage = null; 
-    
+    AppData().loginErrorMessage = null;
+
     try {
       bool success = await AppData().loginStudent(id, pass);
-      
+
       if (!success) {
         // If not a student, try as a teacher
         success = await AppData().loginTeacher(id, pass);
@@ -214,10 +214,9 @@ class _LoginScreenState extends State<LoginScreen> {
                             ? Icons.visibility
                             : Icons.visibility_off,
                       ),
-                      onPressed:
-                          () => setState(
-                            () => _isPasswordVisible = !_isPasswordVisible,
-                          ),
+                      onPressed: () => setState(
+                        () => _isPasswordVisible = !_isPasswordVisible,
+                      ),
                     ),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
@@ -255,7 +254,9 @@ class _LoginScreenState extends State<LoginScreen> {
                       : const Text(
                           'Sign In',
                           style: TextStyle(
-                              fontSize: 16, fontWeight: FontWeight.bold),
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
                 ),
               ],
@@ -335,7 +336,7 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
     _selectedDepartment = AppData().loggedDepartment;
     _selectedYear = AppData().loggedYear;
     _selectedSemester = AppData().loggedSemester;
-    
+
     if (AppData().loggedDob != null) {
       _selectedDob = DateTime.tryParse(AppData().loggedDob!);
     }
@@ -361,8 +362,6 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
     '3rd Year': ['5', '6'],
     '4th Year': ['7', '8'],
   };
-
-
 
   Future<void> _pickDob() async {
     final now = DateTime.now();
@@ -393,9 +392,9 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
         return;
       }
       if (_passController.text != _confirmPassController.text) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Passwords do not match')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Passwords do not match')));
         return;
       }
       setState(() => _isLoading = true);
@@ -428,8 +427,9 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final List<String> semOptions =
-        _selectedYear != null ? (_semestersByYear[_selectedYear!] ?? []) : [];
+    final List<String> semOptions = _selectedYear != null
+        ? (_semestersByYear[_selectedYear!] ?? [])
+        : [];
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -500,13 +500,9 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
                     enabled: false,
                     keyboardType: TextInputType.phone,
                     maxLength: 10,
-                    decoration: _inputDeco(
-                      Icons.phone_outlined,
-                    ),
+                    decoration: _inputDeco(Icons.phone_outlined),
                   ),
                   const SizedBox(height: 16),
-
-
 
                   // Date of Birth
                   _buildRegLabel('Date of Birth'),
@@ -515,19 +511,16 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
                     child: TextFormField(
                       readOnly: true,
                       enabled: false,
-                      decoration: _inputDeco(
-                        Icons.calendar_today_outlined,
-                      ).copyWith(
-                        hintText:
-                            _selectedDob != null
+                      decoration: _inputDeco(Icons.calendar_today_outlined)
+                          .copyWith(
+                            hintText: _selectedDob != null
                                 ? '${_selectedDob!.day.toString().padLeft(2, '0')}/${_selectedDob!.month.toString().padLeft(2, '0')}/${_selectedDob!.year}'
                                 : '-',
-                      ),
+                          ),
                       controller: TextEditingController(
-                        text:
-                            _selectedDob != null
-                                ? '${_selectedDob!.day.toString().padLeft(2, '0')}/${_selectedDob!.month.toString().padLeft(2, '0')}/${_selectedDob!.year}'
-                                : '',
+                        text: _selectedDob != null
+                            ? '${_selectedDob!.day.toString().padLeft(2, '0')}/${_selectedDob!.month.toString().padLeft(2, '0')}/${_selectedDob!.year}'
+                            : '',
                       ),
                     ),
                   ),
@@ -577,8 +570,6 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
                     ],
                   ),
                   const SizedBox(height: 16),
-
-
 
                   // Password
                   _buildRegLabel('Create New Password'),
@@ -647,18 +638,15 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
                         borderRadius: BorderRadius.circular(12),
                       ),
                     ),
-                    child:
-                        _isLoading
-                            ? const CircularProgressIndicator(
-                              color: Colors.white,
-                            )
-                            : const Text(
-                              'Finalize Registration',
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
-                              ),
+                    child: _isLoading
+                        ? const CircularProgressIndicator(color: Colors.white)
+                        : const Text(
+                            'Finalize Registration',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
                             ),
+                          ),
                   ),
                   const SizedBox(height: 16),
                   TextButton(
@@ -817,8 +805,6 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
                   ),
                   const SizedBox(height: 16),
 
-
-
                   _buildRegLabel('Phone Number'),
                   TextFormField(
                     controller: _phoneController,
@@ -833,9 +819,12 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
                     value: _selectedDepartment,
                     decoration: _inputDecoIcon(Icons.account_balance_outlined),
                     items: AppData().predefinedCourses
-                        .map((course) => DropdownMenuItem(
+                        .map(
+                          (course) => DropdownMenuItem(
                             value: course['name'].toString(),
-                            child: Text(course['name'].toString())))
+                            child: Text(course['name'].toString()),
+                          ),
+                        )
                         .toList(),
                     onChanged: (v) => setState(() => _selectedDepartment = v),
                     validator: (v) => v == null ? 'Required' : null,
@@ -865,8 +854,12 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
                               value: _selectedYear,
                               decoration: _inputDecoIcon(Icons.calendar_month),
                               items: _years
-                                  .map((y) => DropdownMenuItem(
-                                      value: y, child: Text(y)))
+                                  .map(
+                                    (y) => DropdownMenuItem(
+                                      value: y,
+                                      child: Text(y),
+                                    ),
+                                  )
                                   .toList(),
                               onChanged: (v) {
                                 setState(() {
@@ -876,7 +869,7 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
                                     '1st Year': ['1', '2'],
                                     '2nd Year': ['3', '4'],
                                     '3rd Year': ['5', '6'],
-                                    '4th Year': ['7', '8']
+                                    '4th Year': ['7', '8'],
                                   };
                                   final validSems = semsMap[v] ?? _semesters;
                                   if (!validSems.contains(_selectedSemester)) {
@@ -903,11 +896,15 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
                                   '1st Year': ['1', '2'],
                                   '2nd Year': ['3', '4'],
                                   '3rd Year': ['5', '6'],
-                                  '4th Year': ['7', '8']
+                                  '4th Year': ['7', '8'],
                                 };
                                 return (semsMap[_selectedYear] ?? _semesters)
-                                    .map((s) => DropdownMenuItem(
-                                        value: s, child: Text('Sem $s')))
+                                    .map(
+                                      (s) => DropdownMenuItem(
+                                        value: s,
+                                        child: Text('Sem $s'),
+                                      ),
+                                    )
                                     .toList();
                               })(),
                               onChanged: (v) =>
@@ -927,11 +924,14 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
                     obscureText: !_isPasswordVisible,
                     decoration: _inputDecoIcon(Icons.lock_outline).copyWith(
                       suffixIcon: IconButton(
-                        icon: Icon(_isPasswordVisible
-                            ? Icons.visibility
-                            : Icons.visibility_off),
+                        icon: Icon(
+                          _isPasswordVisible
+                              ? Icons.visibility
+                              : Icons.visibility_off,
+                        ),
                         onPressed: () => setState(
-                            () => _isPasswordVisible = !_isPasswordVisible),
+                          () => _isPasswordVisible = !_isPasswordVisible,
+                        ),
                       ),
                     ),
                     validator: (v) {
@@ -951,13 +951,18 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
                       foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(vertical: 20),
                       shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12)),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
                     ),
                     child: _isLoading
                         ? const CircularProgressIndicator(color: Colors.white)
-                        : const Text('Complete Registration',
+                        : const Text(
+                            'Complete Registration',
                             style: TextStyle(
-                                fontSize: 16, fontWeight: FontWeight.bold)),
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
                   ),
                   const SizedBox(height: 16),
                   TextButton(
@@ -976,8 +981,10 @@ class _TeacherRegistrationScreenState extends State<TeacherRegistrationScreen> {
   Widget _buildRegLabel(String text) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 6.0, left: 4),
-      child: Text(text,
-          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+      child: Text(
+        text,
+        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+      ),
     );
   }
 
@@ -1032,7 +1039,11 @@ class _ForgotPasswordDialogState extends State<ForgotPasswordDialog> {
       });
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Identity verification failed. Please check your details.')),
+        const SnackBar(
+          content: Text(
+            'Identity verification failed. Please check your details.',
+          ),
+        ),
       );
     }
   }
@@ -1043,9 +1054,9 @@ class _ForgotPasswordDialogState extends State<ForgotPasswordDialog> {
 
     if (pass.isEmpty || confirm.isEmpty) return;
     if (pass != confirm) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Passwords do not match')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Passwords does not match')));
       return;
     }
 
@@ -1062,7 +1073,9 @@ class _ForgotPasswordDialogState extends State<ForgotPasswordDialog> {
       if (mounted) {
         Navigator.pop(context);
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Password reset successfully! Please log in.')),
+          const SnackBar(
+            content: Text('Password reset successfully! Please log in.'),
+          ),
         );
       }
     }
@@ -1097,46 +1110,85 @@ class _ForgotPasswordDialogState extends State<ForgotPasswordDialog> {
             mainAxisSize: MainAxisSize.min,
             children: [
               if (!_isVerified) ...[
-                const Text('Enter your details as provided during registration to verify your identity.'),
+                const Text(
+                  'Enter your details as provided during registration to verify your identity.',
+                ),
                 const SizedBox(height: 16),
-                _buildField('Enrollment No / ID', _idController, Icons.badge_outlined),
+                _buildField(
+                  'Enrollment No / ID',
+                  _idController,
+                  Icons.badge_outlined,
+                ),
                 const SizedBox(height: 12),
                 _buildField('Full Name', _nameController, Icons.person_outline),
                 const SizedBox(height: 12),
                 GestureDetector(
                   onTap: _pickDob,
                   child: AbsorbPointer(
-                    child: _buildField('Date of Birth', _dobController, Icons.calendar_today_outlined),
+                    child: _buildField(
+                      'Date of Birth',
+                      _dobController,
+                      Icons.calendar_today_outlined,
+                    ),
                   ),
                 ),
               ] else ...[
-                const Text('Verification successful. Please enter a new password.'),
+                const Text(
+                  'Verification successful. Please enter a new password.',
+                ),
                 const SizedBox(height: 16),
-                _buildField('New Password', _newPassController, Icons.lock_outline, obscure: true),
+                _buildField(
+                  'New Password',
+                  _newPassController,
+                  Icons.lock_outline,
+                  obscure: true,
+                ),
                 const SizedBox(height: 12),
-                _buildField('Confirm Password', _confirmPassController, Icons.lock_reset_rounded, obscure: true),
+                _buildField(
+                  'Confirm Password',
+                  _confirmPassController,
+                  Icons.lock_reset_rounded,
+                  obscure: true,
+                ),
               ],
             ],
           ),
         ),
       ),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
         ElevatedButton(
-          onPressed: _isLoading ? null : (_isVerified ? _handleReset : _handleVerify),
+          onPressed: _isLoading
+              ? null
+              : (_isVerified ? _handleReset : _handleVerify),
           style: ElevatedButton.styleFrom(
             backgroundColor: const Color(0xFF6C5CE7),
             foregroundColor: Colors.white,
           ),
           child: _isLoading
-              ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+              ? const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                )
               : Text(_isVerified ? 'Reset Password' : 'Verify Identity'),
         ),
       ],
     );
   }
 
-  Widget _buildField(String hint, TextEditingController controller, IconData icon, {bool obscure = false}) {
+  Widget _buildField(
+    String hint,
+    TextEditingController controller,
+    IconData icon, {
+    bool obscure = false,
+  }) {
     return TextField(
       controller: controller,
       obscureText: obscure,
@@ -1144,7 +1196,10 @@ class _ForgotPasswordDialogState extends State<ForgotPasswordDialog> {
         hintText: hint,
         prefixIcon: Icon(icon, size: 20),
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 16,
+          vertical: 12,
+        ),
       ),
     );
   }

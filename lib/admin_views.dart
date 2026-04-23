@@ -1355,9 +1355,9 @@ class _ManageStudentsViewState extends State<ManageStudentsView> {
 
   Future<void> _handleAddStudent() async {
     if (!_formKey.currentState!.validate()) return;
-    if (_selectedDept == null || _selectedYear == null || _selectedSem == null) {
+    if (_selectedSem == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please select all dropdown fields')),
+        const SnackBar(content: Text('Please select Semester')),
       );
       return;
     }
@@ -1369,8 +1369,8 @@ class _ManageStudentsViewState extends State<ManageStudentsView> {
         name: _nameController.text.trim(),
         phone: _phoneController.text.trim(),
         dob: _dobController.text.trim(),
-        department: _selectedDept!,
-        year: _selectedYear!,
+        department: 'All',
+        year: 'All',
         semester: _selectedSem!,
       );
 
@@ -1378,8 +1378,6 @@ class _ManageStudentsViewState extends State<ManageStudentsView> {
       _nameController.clear();
       _phoneController.clear();
       _dobController.clear();
-      _selectedDept = null;
-      _selectedYear = null;
       _selectedSem = null;
 
       await _loadStudents();
@@ -1548,18 +1546,6 @@ class _ManageStudentsViewState extends State<ManageStudentsView> {
                               const SizedBox(height: 20),
                               Row(
                                 children: [
-                                  Expanded(
-                                    child: _buildDropDownSmall('Dept', _selectedDept, _departments, (v) {
-                                      setState(() => _selectedDept = v);
-                                    }),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Expanded(
-                                    child: _buildDropDownSmall('Year', _selectedYear, _years, (v) {
-                                      setState(() => _selectedYear = v);
-                                    }),
-                                  ),
-                                  const SizedBox(width: 12),
                                   Expanded(
                                     child: _buildDropDownSmall('Sem', _selectedSem, List.generate(8, (i) => (i + 1).toString()), (v) {
                                       setState(() => _selectedSem = v);
@@ -1791,12 +1777,8 @@ class _ManageStudentsViewState extends State<ManageStudentsView> {
                   const SizedBox(height: 8),
                   _buildDetailRow('Enroll No', enrollNo),
                   _buildDetailRow(
-                    'Dept',
-                    s['department']?.toString() ?? '-',
-                  ),
-                  _buildDetailRow(
-                    'Year/Sem',
-                    '${s['year']} / ${s['semester']}',
+                    'Semester',
+                    '${s['semester']}',
                   ),
                   const Divider(height: 24),
                   Align(
@@ -1856,8 +1838,6 @@ class _ManageStudentsViewState extends State<ManageStudentsView> {
             columns: const [
               DataColumn(label: Text('Enrollment No')),
               DataColumn(label: Text('Name')),
-              DataColumn(label: Text('Dept')),
-              DataColumn(label: Text('Year')),
               DataColumn(label: Text('Sem')),
               DataColumn(label: Text('Account Status')),
             ],
@@ -1869,8 +1849,6 @@ class _ManageStudentsViewState extends State<ManageStudentsView> {
                 cells: [
                   DataCell(Text(enrollNo)),
                   DataCell(Text(s['name']?.toString() ?? '-')),
-                  DataCell(Text(s['department']?.toString() ?? '-')),
-                  DataCell(Text(s['year']?.toString() ?? '-')),
                   DataCell(Text(s['semester']?.toString() ?? '-')),
                   DataCell(
                     Row(
@@ -2042,11 +2020,9 @@ class _ManageStudentsViewState extends State<ManageStudentsView> {
                   ),
                   const Divider(height: 20),
                   _buildMobileField(Icons.phone_android_rounded, 'Phone', s['phone']),
-                  _buildMobileField(Icons.business_rounded, 'Dept', s['department']),
                   _buildMobileField(Icons.calendar_month_rounded, 'DOB', s['dob']),
                   Row(
                     children: [
-                      Expanded(child: _buildMobileField(Icons.history_edu_rounded, 'Year', s['year'])),
                       Expanded(child: _buildMobileField(Icons.school_rounded, 'Sem', s['semester'])),
                     ],
                   ),
@@ -2078,8 +2054,6 @@ class _ManageStudentsViewState extends State<ManageStudentsView> {
               DataColumn(label: Text('Name')),
               DataColumn(label: Text('Phone')),
               DataColumn(label: Text('DOB')),
-              DataColumn(label: Text('Dept')),
-              DataColumn(label: Text('Year')),
               DataColumn(label: Text('Sem')),
             ],
             rows: students.map((s) => DataRow(cells: [
@@ -2087,8 +2061,6 @@ class _ManageStudentsViewState extends State<ManageStudentsView> {
               DataCell(Text(s['name']?.toString() ?? '-')),
               DataCell(Text(s['phone']?.toString() ?? '-')),
               DataCell(Text(s['dob']?.toString() ?? '-')),
-              DataCell(Text(s['department']?.toString() ?? '-')),
-              DataCell(Text(s['year']?.toString() ?? '-')),
               DataCell(Text(s['semester']?.toString() ?? '-')),
             ])).toList(),
           ),

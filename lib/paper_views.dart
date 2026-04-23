@@ -195,7 +195,7 @@ class _PaperDetailScreenState extends State<PaperDetailScreen> {
         // Filter assignments by THIS paper
         List assigns = AppData()
             .filteredAssignments(classId)
-            .where((a) => a['paperId'] == paperId)
+            .where((a) => a['paperId'] == paperId || a['paperId'] == null)
             .toList();
 
         if (assigns.isEmpty) {
