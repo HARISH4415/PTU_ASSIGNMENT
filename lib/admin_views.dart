@@ -1,7 +1,7 @@
+import 'models/app_data.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'main.dart';
 
 // ---------------------------------------------------------
 // Admin Specific Views
@@ -236,7 +236,7 @@ class _AdminDashboardViewState extends State<AdminDashboardView> {
             });
           }
 
-          void _addPoint(bool isDo) {
+          void addPoint(bool isDo) {
             final entryController = TextEditingController();
             showDialog(
               context: ctx,
@@ -253,8 +253,11 @@ class _AdminDashboardViewState extends State<AdminDashboardView> {
                     onPressed: () {
                       if (entryController.text.trim().isNotEmpty) {
                         setDialogState(() {
-                          if (isDo) dos.add(entryController.text.trim());
-                          else donts.add(entryController.text.trim());
+                          if (isDo) {
+                            dos.add(entryController.text.trim());
+                          } else {
+                            donts.add(entryController.text.trim());
+                          }
                         });
                       }
                       Navigator.pop(pctx);
@@ -266,7 +269,7 @@ class _AdminDashboardViewState extends State<AdminDashboardView> {
             );
           }
 
-          Widget _buildSection(String title, List<String> items, bool isDo) {
+          Widget buildSection(String title, List<String> items, bool isDo) {
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -275,7 +278,7 @@ class _AdminDashboardViewState extends State<AdminDashboardView> {
                   children: [
                     Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                     TextButton.icon(
-                      onPressed: () => _addPoint(isDo),
+                      onPressed: () => addPoint(isDo),
                       icon: const Icon(Icons.add, size: 18),
                       label: Text('Add ${isDo ? 'Do' : 'Don''t'}'),
                       style: TextButton.styleFrom(foregroundColor: isDo ? Colors.green : Colors.red),
@@ -311,7 +314,7 @@ class _AdminDashboardViewState extends State<AdminDashboardView> {
                         ],
                       ),
                     );
-                  }).toList(),
+                  }),
                 const SizedBox(height: 16),
               ],
             );
@@ -327,9 +330,9 @@ class _AdminDashboardViewState extends State<AdminDashboardView> {
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          _buildSection('DO''S (Recommended actions)', dos, true),
+                          buildSection('DO''S (Recommended actions)', dos, true),
                           const Divider(),
-                          _buildSection('DON''TS (Prohibited actions)', donts, false),
+                          buildSection('DON''TS (Prohibited actions)', donts, false),
                         ],
                       ),
                     ),
@@ -366,9 +369,7 @@ class _AdminDashboardViewState extends State<AdminDashboardView> {
     String title,
     String val,
     IconData icon,
-    Color color, {
-    bool fullWidth = false,
-  }) {
+    Color color) {
     return Container(
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
@@ -713,7 +714,7 @@ class _ManageCoursesViewState extends State<ManageCoursesView> {
             });
           }
 
-          Future<void> _addNewPaper() async {
+          Future<void> addNewPaper() async {
             final pName = paperNameCtrl.text.trim();
             final pId = paperIdCtrl.text.trim();
             if (pName.isEmpty || pId.isEmpty) return;
@@ -784,7 +785,7 @@ class _ManageCoursesViewState extends State<ManageCoursesView> {
                         SizedBox(
                           width: double.infinity,
                           child: ElevatedButton.icon(
-                            onPressed: isDialogLoading ? null : _addNewPaper,
+                            onPressed: isDialogLoading ? null : addNewPaper,
                             icon: const Icon(Icons.add),
                             label: const Text('Add Paper'),
                             style: ElevatedButton.styleFrom(

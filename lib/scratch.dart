@@ -1,23 +1,22 @@
-import 'dart:io';
 import 'package:excel/excel.dart';
 
 void main() {
   try {
     var excel = Excel.createExcel();
     Sheet sheetObject = excel['Sheet1'];
-    
+
     // Add some rows
     sheetObject.appendRow([
-      TextCellValue('Question'), 
-      TextCellValue('Opt A'), 
-      TextCellValue('Opt B'), 
-      TextCellValue('Opt C'), 
-      TextCellValue('Opt D'), 
-      TextCellValue('Ans')
+      TextCellValue('Question'),
+      TextCellValue('Opt A'),
+      TextCellValue('Opt B'),
+      TextCellValue('Opt C'),
+      TextCellValue('Opt D'),
+      TextCellValue('Ans'),
     ]);
-    
+
     var bytes = excel.save();
-    
+
     var parsedExcel = Excel.decodeBytes(bytes!);
 
     for (var table in parsedExcel.tables.keys) {

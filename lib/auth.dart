@@ -1,7 +1,7 @@
+import 'models/app_data.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'dart:async';
-import 'main.dart';
 
 // ---------------------------------------------------------
 // Login Screen
