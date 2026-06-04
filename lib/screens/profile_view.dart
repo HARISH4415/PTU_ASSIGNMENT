@@ -289,6 +289,7 @@ class _ProfileViewState extends State<ProfileView> {
   }
 
   void _showEditProfileDialog(BuildContext context, bool isTeacher) {
+    final isAdmin = AppData().currentUserRole == UserRole.admin;
     final nameCtrl = TextEditingController(text: AppData().loggedName);
     final emailCtrl = TextEditingController(text: AppData().loggedEmail);
     final phoneCtrl = TextEditingController(text: AppData().loggedPhone);
@@ -353,9 +354,10 @@ class _ProfileViewState extends State<ProfileView> {
                         fillColor: Colors.grey.shade50,
                       ),
                     ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: emailCtrl,
+                    if (!isAdmin) ...[
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: emailCtrl,
                       decoration: InputDecoration(
                         labelText: 'Email Address',
                         prefixIcon: const Icon(Icons.email_outlined),
@@ -473,6 +475,7 @@ class _ProfileViewState extends State<ProfileView> {
                         onChanged: (v) =>
                             setDialogState(() => selectedDesignation = v),
                       ),
+                    ],
                     ],
                   ],
                 ),

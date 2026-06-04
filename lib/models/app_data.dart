@@ -486,7 +486,7 @@ class AppData extends ChangeNotifier {
           'student_id': studentId,
           'is_turned_in': isDone,
           'submission_file_name': fName,
-        }, onConflict: 'unique_student_assignment');
+        }, onConflict: 'student_id, assignment_id');
       }
     } catch (e) {
       debugPrint('Supabase upsert status error: $e');
