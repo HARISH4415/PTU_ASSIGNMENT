@@ -1056,8 +1056,8 @@ void openCreateAssignmentDialog(
   DateTime endDateTime = DateTime.now().add(const Duration(days: 7));
   PlatformFile? pickedFile;
   List<dynamic>? mcqData;
-  String selectedYear = AppData().loggedYear ?? 'All';
-  String selectedSem = AppData().loggedSemester ?? 'All';
+  String selectedYear = 'All';
+  String selectedSem = 'All';
 
   String? currentSelectedClassId =
       manualClassId ??
@@ -1113,6 +1113,48 @@ void openCreateAssignmentDialog(
                         labelText: 'Assignment Title',
                         border: OutlineInputBorder(),
                       ),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            value: selectedYear,
+                            decoration: const InputDecoration(
+                              labelText: 'Year',
+                              border: OutlineInputBorder(),
+                            ),
+                            items: ['All', '1', '2', '3', '4']
+                                .map((y) => DropdownMenuItem(
+                                      value: y,
+                                      child: Text(y),
+                                    ))
+                                .toList(),
+                            onChanged: (val) {
+                              if (val != null) setDialogState(() => selectedYear = val);
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            value: selectedSem,
+                            decoration: const InputDecoration(
+                              labelText: 'Semester',
+                              border: OutlineInputBorder(),
+                            ),
+                            items: ['All', '1', '2', '3', '4', '5', '6', '7', '8']
+                                .map((s) => DropdownMenuItem(
+                                      value: s,
+                                      child: Text(s),
+                                    ))
+                                .toList(),
+                            onChanged: (val) {
+                              if (val != null) setDialogState(() => selectedSem = val);
+                            },
+                          ),
+                        ),
+                      ],
                     ),
                     const SizedBox(height: 16),
                     ListTile(
@@ -1191,7 +1233,7 @@ void openCreateAssignmentDialog(
                     const SizedBox(height: 16),
                     OutlinedButton.icon(
                       onPressed: () async {
-                        var res = await FilePicker.platform.pickFiles();
+                        var res = await FilePicker.platform.pickFiles(withData: true);
                         if (res != null) {
                           setDialogState(() => pickedFile = res.files.first);
                         }

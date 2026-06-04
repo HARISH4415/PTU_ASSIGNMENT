@@ -496,6 +496,7 @@ class _AssignmentInteractionScreenState
   Future<void> _pickFiles() async {
     FilePickerResult? result = await FilePicker.platform.pickFiles(
       allowMultiple: false,
+      withData: true,
     );
     if (result != null) {
       AppData().submitFiles(widget.assignment['id'], result.files);

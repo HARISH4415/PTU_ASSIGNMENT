@@ -260,11 +260,34 @@ class AppData extends ChangeNotifier {
           .map((d) => _buildClassNode(d))
           .toList();
     } else {
-      // Students ONLY see their own department's course
+      List<Map<String, dynamic>> studentClasses = [];
+      Set<String> addedIds = {};
+
+      // Always include their own department
       if (loggedDepartment != null && loggedDepartment!.isNotEmpty) {
-        return [_buildClassNode(loggedDepartment!)];
+        studentClasses.add(_buildClassNode(loggedDepartment!));
+        addedIds.add(_normalizeClassId(loggedDepartment!));
       }
-      return [];
+
+      // Also include any courses that have assignments matching this student's year/sem
+      for (var entry in classAssignments.entries) {
+        if (addedIds.contains(entry.key)) continue;
+
+        var assigns = filteredAssignments(entry.key);
+        if (assigns.isNotEmpty) {
+          String courseName = entry.key.replaceAll('dept_', '').replaceAll('_', ' ');
+          for (var pc in predefinedCourses) {
+            if (_normalizeClassId(pc['name'].toString()) == entry.key) {
+              courseName = pc['name'].toString();
+              break;
+            }
+          }
+          studentClasses.add(_buildClassNode(courseName));
+          addedIds.add(entry.key);
+        }
+      }
+      
+      return studentClasses;
     }
   }
 
@@ -463,7 +486,7 @@ class AppData extends ChangeNotifier {
           'student_id': studentId,
           'is_turned_in': isDone,
           'submission_file_name': fName,
-        }, onConflict: 'student_id, assignment_id');
+        }, onConflict: 'unique_student_assignment');
       }
     } catch (e) {
       debugPrint('Supabase upsert status error: $e');
@@ -1510,7 +1533,6 @@ class AppData extends ChangeNotifier {
           'instructor_file_name': file?.name,
           'year': year,
           'semester': semester,
-          'paper_id': paperId, // Reference paper
         });
       }
     } catch (e) {
