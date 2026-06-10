@@ -4,7 +4,6 @@ void main() {
   try {
     var excel = Excel.createExcel();
     Sheet sheetObject = excel['Sheet1'];
-
     // Add some rows
     sheetObject.appendRow([
       TextCellValue('Question'),
